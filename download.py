@@ -5,7 +5,7 @@ Example: python download.py "https://1024terabox.com/s/1bwf-DxcMG6LU6lnPz4VlaA"
 import sys
 import requests
 
-API = "http://127.0.0.1:5000"
+API = "https://terabox-downloader-api-pqxy.onrender.com"
 
 def download(share_url: str):
     # Step 1: get file info + dlink from local API
