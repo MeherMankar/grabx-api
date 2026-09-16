@@ -54,6 +54,19 @@ TERABOX_DOMAINS = [
     ".teraboxapp.com", ".terabox.app",
     ".nephobox.com", ".4funbox.co",
     ".mirrobox.com", ".momerybox.com",
+    ".terasharefile.com",
+]
+
+# All known Terabox domain hostnames (for WAP URL candidates)
+TERABOX_HOSTNAMES = [
+    "www.terabox.com",
+    "www.1024terabox.com",
+    "www.teraboxapp.com",
+    "www.terasharefile.com",
+    "www.nephobox.com",
+    "www.4funbox.co",
+    "www.mirrobox.com",
+    "www.momerybox.com",
 ]
 
 # ---------------------------------------------------------------------------
@@ -162,22 +175,33 @@ def parse_surl(share_url: str) -> str:
 # WAP page extraction  (the core bypass)
 # ---------------------------------------------------------------------------
 
-def fetch_wap_page(session: req_lib.Session, surl: str) -> tuple:
+def fetch_wap_page(session: req_lib.Session, surl: str, share_url: str = "") -> tuple:
     """
     Load the Terabox WAP share page and return (html, final_surl).
 
-    Tries multiple URL variants with a retry loop (as in FZBypassBot).
+    Tries the original share domain first, then known fallbacks.
     The WAP page embeds window.__INITIAL_STATE__ with the file list + dlinks.
     """
-    wap_candidates = [
-        f"http://www.terabox.com/wap/share/filelist?surl={surl}",
-        f"https://www.1024terabox.com/wap/share/filelist?surl={surl}",
-        f"https://www.teraboxapp.com/wap/share/filelist?surl={surl}",
-    ]
+    # Build candidate list — try the original share domain first
+    candidates = []
+    if share_url:
+        host = urlparse(share_url).hostname or ""
+        if host:
+            candidates.append(f"http://{host}/wap/share/filelist?surl={surl}")
+            candidates.append(f"https://{host}/wap/share/filelist?surl={surl}")
+
+    # Then try known working hosts
+    for host in TERABOX_HOSTNAMES:
+        url = f"https://{host}/wap/share/filelist?surl={surl}"
+        if url not in candidates:
+            candidates.append(url)
+    # http fallback for terabox.com (avoids TLS reset on some networks)
+    candidates.append(f"http://www.terabox.com/wap/share/filelist?surl={surl}")
+
     headers = {"User-Agent": MOBILE_UA, "Accept": "text/html,*/*"}
     last_error = None
 
-    for url in wap_candidates:
+    for url in candidates:
         try:
             resp = session.get(url, headers=headers, allow_redirects=True, timeout=15)
             if resp.status_code == 200 and "__INITIAL_STATE__" in resp.text:
@@ -288,7 +312,7 @@ def download():
         surl = parse_surl(share_url)
 
         # 2. Load WAP page — this is the bypass (no CAPTCHA gate)
-        html, final_surl = fetch_wap_page(session, surl)
+        html, final_surl = fetch_wap_page(session, surl, share_url)
 
         # 3. Extract file list from embedded __INITIAL_STATE__
         file_list = extract_file_info(html)
