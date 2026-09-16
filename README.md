@@ -1,5 +1,7 @@
 # Terabox Downloader API
 
+[![GitHub](https://img.shields.io/badge/GitHub-MeherMankar%2Fterabox--downloader--api-blue?logo=github)](https://github.com/MeherMankar/terabox-downloader-api)
+
 A self-hosted Flask API that extracts direct download links from any Terabox share URL — no third-party services, no CAPTCHA, deployed in seconds on Vercel.
 
 > **How it works:** Uses the Terabox WAP (mobile) page which embeds file metadata including signed download links directly in its HTML — bypassing the verify_v2 gate entirely.
@@ -81,7 +83,7 @@ Returns the API documentation as Markdown.
 ### Local development
 
 ```bash
-git clone https://github.com/MediaRealms-ORG/terabox-downloader-api
+git clone https://github.com/MeherMankar/terabox-downloader-api
 cd terabox-downloader-api
 pip install -r requirements.txt
 ```
