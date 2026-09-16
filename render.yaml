@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: terabox-downloader-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: TERABOX_COOKIE
+        sync: false   # set manually in Render dashboard
+    healthCheckPath: /

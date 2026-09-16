@@ -155,6 +155,27 @@ Your API will be live at `https://your-project.vercel.app`.
 
 ---
 
+## Deploy to Render
+
+1. Push this repo to GitHub
+
+2. Go to [render.com](https://render.com) → **New** → **Web Service** → connect your repo
+
+3. Render will auto-detect the `Dockerfile`. Set:
+   | Setting | Value |
+   |---------|-------|
+   | Environment | `Docker` |
+   | Port | `8000` |
+
+4. Add environment variable:
+   | Name | Value |
+   |------|-------|
+   | `TERABOX_COOKIE` | `ndus=VALUE1,ndus=VALUE2` |
+
+5. Click **Deploy**
+
+---
+
 ## Usage examples
 
 ### Python
