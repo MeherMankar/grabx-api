@@ -54,10 +54,13 @@ TERABOX_DOMAINS = [
     ".teraboxapp.com", ".terabox.app",
     ".nephobox.com", ".4funbox.co",
     ".mirrobox.com", ".momerybox.com",
+    ".teraboxlink.com", ".terafileshare.com",
+    ".freeterabox.com", ".teraboxshare.com",
+    ".terabox1.com", ".terabox2.com",
     ".terasharefile.com",
 ]
 
-# All known Terabox domain hostnames (for WAP URL candidates)
+# All known Terabox hostnames to try for WAP page loading
 TERABOX_HOSTNAMES = [
     "www.terabox.com",
     "www.1024terabox.com",
@@ -67,6 +70,12 @@ TERABOX_HOSTNAMES = [
     "www.4funbox.co",
     "www.mirrobox.com",
     "www.momerybox.com",
+    "www.freeterabox.com",
+    "www.teraboxlink.com",
+    "www.terafileshare.com",
+    "www.teraboxshare.com",
+    "www.terabox1.com",
+    "www.terabox2.com",
 ]
 
 # ---------------------------------------------------------------------------
@@ -147,7 +156,8 @@ def build_session(ndus: str) -> req_lib.Session:
 def parse_surl(share_url: str) -> str:
     """
     Extract the surl key from any Terabox share URL:
-      https://terabox.com/s/1ABC...   -> strip leading 1 if > 22 chars
+      https://terabox.com/s/1ABC...          -> strip leading 1 if > 22 chars
+      https://terasharefile.com/s/1-ABC...   -> same
       https://terabox.com/sharing/link?surl=ABC...
     """
     parsed = urlparse(share_url)
