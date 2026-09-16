@@ -90,7 +90,11 @@ pip install -r requirements.txt
 
 Create a `.env` file:
 ```
+# Single account
 TERABOX_COOKIE=ndus=YOUR_NDUS_VALUE_HERE
+
+# Multiple accounts — one is picked randomly per request
+TERABOX_COOKIE=ndus=ACCOUNT1_NDUS,ndus=ACCOUNT2_NDUS,ndus=ACCOUNT3_NDUS
 ```
 
 Run the server:
@@ -139,7 +143,9 @@ It calls your local API, gets the direct link, and downloads the file with a pro
 3. Add environment variable:
    | Name | Value |
    |------|-------|
-   | `TERABOX_COOKIE` | `ndus=YOUR_NDUS_VALUE_HERE` |
+   | `TERABOX_COOKIE` | `ndus=VALUE1,ndus=VALUE2,ndus=VALUE3` |
+
+   For a single account just use `ndus=YOUR_VALUE`. The API picks one randomly per request to distribute load and reduce ban risk.
 
 4. Click **Deploy**
 

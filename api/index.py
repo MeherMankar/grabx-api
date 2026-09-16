@@ -23,6 +23,7 @@ import requests as req_lib
 import os
 import re
 import json
+import random
 from urllib.parse import urlparse, parse_qs, quote, unquote
 
 # Load .env file if present (local development)
@@ -59,20 +60,63 @@ TERABOX_DOMAINS = [
 # Cookie helpers
 # ---------------------------------------------------------------------------
 
-def get_ndus() -> str:
-    """Extract ndus value from TERABOX_COOKIE env var."""
+def _parse_ndus_list() -> list:
+    """
+    Parse TERABOX_COOKIE env var into a list of ndus values.
+
+    Accepts two formats:
+      Single account:   ndus=VALUE
+      Multi-account:    ndus=VALUE1,ndus=VALUE2,ndus=VALUE3
+                        or just: VALUE1,VALUE2,VALUE3
+    Returns a list of raw ndus strings.
+    """
     cookie_str = os.environ.get("TERABOX_COOKIE", "").strip()
     if not cookie_str:
         raise ValueError(
             "TERABOX_COOKIE environment variable is not set. "
-            "Set it to your Terabox ndus cookie value, e.g.: ndus=YourValueHere"
+            "For a single account: ndus=YOUR_VALUE\n"
+            "For multiple accounts: ndus=VALUE1,ndus=VALUE2,ndus=VALUE3"
         )
-    for part in cookie_str.split(";"):
-        part = part.strip()
-        if part.lower().startswith("ndus="):
-            return part[5:].strip()
-    # Raw value with no key prefix
-    return cookie_str.strip()
+
+    accounts = []
+    # Split on comma — handles both "ndus=A,ndus=B" and "A,B"
+    for entry in cookie_str.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if entry.lower().startswith("ndus="):
+            accounts.append(entry[5:].strip())
+        else:
+            # Might be a full cookie string "ndus=X; csrfToken=Y; ..."
+            found = False
+            for part in entry.split(";"):
+                part = part.strip()
+                if part.lower().startswith("ndus="):
+                    accounts.append(part[5:].strip())
+                    found = True
+                    break
+            if not found:
+                # Treat as raw ndus value
+                accounts.append(entry)
+
+    if not accounts:
+        raise ValueError("No valid ndus values found in TERABOX_COOKIE.")
+
+    return accounts
+
+
+def get_random_ndus() -> str:
+    """Pick a random ndus value from the configured account pool."""
+    accounts = _parse_ndus_list()
+    return random.choice(accounts)
+
+
+def get_account_count() -> int:
+    """Return how many accounts are configured."""
+    try:
+        return len(_parse_ndus_list())
+    except ValueError:
+        return 0
 
 
 def build_session(ndus: str) -> req_lib.Session:
@@ -205,6 +249,7 @@ def home():
         "status": "active",
         "message": "Terabox Downloader API",
         "creator": "Maintained by MeherMankar (t.me/MeherPatil) | Base by genxnano (t.me/genxnano)",
+        "accounts_configured": get_account_count(),
         "endpoints": {
             "/download": {
                 "method": "POST",
@@ -236,7 +281,7 @@ def download():
     share_url = body["url"].strip()
 
     try:
-        ndus = get_ndus()
+        ndus = get_random_ndus()
         session = build_session(ndus)
 
         # 1. Parse surl
@@ -319,7 +364,7 @@ def proxy():
         return jsonify({"status": "error", "message": "'url' query param required"}), 400
 
     try:
-        ndus = get_ndus()
+        ndus = get_random_ndus()
         session = build_session(ndus)
 
         upstream = session.get(
