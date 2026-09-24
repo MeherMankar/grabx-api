@@ -173,17 +173,22 @@ def _verify_proxy_token(cdn_url: str) -> bool:
     return hmac.compare_digest(token_str, expected_b64)
 
 
-def _make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "") -> str:
+def _make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
+                    viewkey: str = "", quality: str = "") -> str:
     """
     Build a full proxy URL with an embedded signed token.
-    path  — e.g. '/proxy' or '/ph/proxy'
-    extra — any extra query params like '&dl=1'
+    path     — e.g. '/proxy' or '/ph/proxy'
+    extra    — any extra query params like '&dl=1'
+    viewkey  — PH viewkey; embedded so the proxy can auto-refresh expired CDN links
+    quality  — quality label (e.g. '1080') for targeted refresh
     """
     enc   = quote(cdn_url, safe="")
     token = _sign_url(cdn_url)
+    vk_part = f"&vk={quote(viewkey)}" if viewkey else ""
+    q_part  = f"&q={quote(quality)}"  if quality  else ""
     if token:
-        return f"{base_url}{path}?url={enc}&{token}{extra}"
-    return f"{base_url}{path}?url={enc}{extra}"
+        return f"{base_url}{path}?url={enc}&{token}{vk_part}{q_part}{extra}"
+    return f"{base_url}{path}?url={enc}{vk_part}{q_part}{extra}"
 
 
 def _check_raw_key() -> bool:
@@ -1106,14 +1111,18 @@ def ph_download():
         meta, all_qualities = _ph_get_all_qualities(body["url"].strip())
 
         base_url = request.host_url.rstrip("/")
+        vk = meta.get("viewkey", "")
         for q in all_qualities:
-            q["proxy_url"]    = _make_proxy_url(base_url, "/ph/proxy", q["url"])
-            q["download_url"] = _make_proxy_url(base_url, "/ph/proxy", q["url"], extra="&dl=1")
+            ql = str(q.get("quality", ""))
+            q["proxy_url"]    = _make_proxy_url(base_url, "/ph/proxy", q["url"], viewkey=vk, quality=ql)
+            q["download_url"] = _make_proxy_url(base_url, "/ph/proxy", q["url"], extra="&dl=1", viewkey=vk, quality=ql)
 
         mp4s          = [q for q in all_qualities if q["format"] == "mp4"]
-        best_url      = mp4s[0]["url"] if mp4s else all_qualities[0]["url"]
-        best_proxy    = _make_proxy_url(base_url, "/ph/proxy", best_url)
-        best_download = _make_proxy_url(base_url, "/ph/proxy", best_url, extra="&dl=1")
+        best           = mp4s[0] if mp4s else all_qualities[0]
+        best_url      = best["url"]
+        best_ql       = str(best.get("quality", ""))
+        best_proxy    = _make_proxy_url(base_url, "/ph/proxy", best_url, viewkey=vk, quality=best_ql)
+        best_download = _make_proxy_url(base_url, "/ph/proxy", best_url, extra="&dl=1", viewkey=vk, quality=best_ql)
         watch_url     = f"{base_url}/ph/watch/{meta['viewkey']}" if meta.get("viewkey") else ""
 
         return jsonify({
@@ -1163,10 +1172,11 @@ def ph_watch(viewkey: str):
     mp4_opts = []
     for q in all_qualities:
         if q["format"] == "mp4":
+            ql = str(q.get("quality", ""))
             mp4_opts.append({
-                "label":    f"{q['quality']}p",
-                "proxy":    _make_proxy_url(base_url, "/ph/proxy", q["url"]),
-                "download": _make_proxy_url(base_url, "/ph/proxy", q["url"], extra="&dl=1"),
+                "label":    f"{ql}p",
+                "proxy":    _make_proxy_url(base_url, "/ph/proxy", q["url"], viewkey=viewkey, quality=ql),
+                "download": _make_proxy_url(base_url, "/ph/proxy", q["url"], extra="&dl=1", viewkey=viewkey, quality=ql),
             })
 
     if not mp4_opts:
@@ -1284,11 +1294,34 @@ def ph_proxy():
 
         if not is_hls and not download_mode:
             # Stream mode for MP4: resolve final URL then redirect browser to CDN directly.
-            # This avoids proxying gigabytes through the server and bypasses Render's 30s timeout.
             head = session.head(
                 cdn_url, headers=req_headers, allow_redirects=True,
                 timeout=15, http_version=3, doh_url="https://1.1.1.1/dns-query",
             )
+            # Auto-refresh if CDN link is IP-expired
+            if head.status_code in (403, 410, 451):
+                viewkey = request.args.get("vk", "")
+                quality = request.args.get("q", "")
+                if viewkey:
+                    try:
+                        _, fresh_qs = _ph_get_all_qualities(
+                            f"https://www.pornhub.com/view_video.php?viewkey={viewkey}"
+                        )
+                        target = None
+                        if quality:
+                            target = next((x for x in fresh_qs
+                                           if str(x.get("quality")) == quality
+                                           and x.get("format") == "mp4"), None)
+                        if not target:
+                            mp4s   = [x for x in fresh_qs if x.get("format") == "mp4"]
+                            target = mp4s[0] if mp4s else fresh_qs[0]
+                        cdn_url = target["url"]
+                        head = session.head(
+                            cdn_url, headers=req_headers, allow_redirects=True,
+                            timeout=15, http_version=3, doh_url="https://1.1.1.1/dns-query",
+                        )
+                    except Exception:
+                        pass
             if head.status_code not in (200, 206):
                 return jsonify({
                     "status": "error",
@@ -1302,6 +1335,36 @@ def ph_proxy():
             timeout=30, http_version=3, doh_url="https://1.1.1.1/dns-query",
             stream=True,
         )
+
+        # PH CDN links are IP-signed. If the link was generated on a different
+        # server instance / IP, the CDN returns 403 or 410. Auto-refresh by
+        # re-resolving a fresh signed URL using the viewkey + quality embedded
+        # in the request (passed as vk= and q= params by _make_proxy_url).
+        if upstream.status_code in (403, 410, 451):
+            viewkey = request.args.get("vk", "")
+            quality = request.args.get("q", "")
+            if viewkey:
+                try:
+                    fresh_meta, fresh_qs = _ph_get_all_qualities(
+                        f"https://www.pornhub.com/view_video.php?viewkey={viewkey}"
+                    )
+                    # Pick matching quality or fall back to best
+                    target = None
+                    if quality:
+                        target = next((x for x in fresh_qs if str(x.get("quality")) == quality
+                                       and x.get("format") == ("hls" if is_hls else "mp4")), None)
+                    if not target:
+                        fmt_qs = [x for x in fresh_qs if x.get("format") == ("hls" if is_hls else "mp4")]
+                        target = fmt_qs[0] if fmt_qs else fresh_qs[0]
+                    cdn_url = target["url"]
+                    upstream = session.get(
+                        cdn_url, headers=req_headers, allow_redirects=True,
+                        timeout=30, http_version=3, doh_url="https://1.1.1.1/dns-query",
+                        stream=True,
+                    )
+                except Exception:
+                    pass  # fall through to the status code check below
+
         if upstream.status_code not in (200, 206):
             return jsonify({
                 "status": "error",
