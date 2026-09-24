@@ -60,8 +60,11 @@ app = Flask(__name__)
 # API Key authentication
 # ===========================================================================
 
-# Set API_KEY env var to enable auth. Leave unset to run without auth (open).
-_API_KEY = os.environ.get("API_KEY", "").strip()
+# Set API_KEY (or GRABX_API_KEY) env var to enable auth. Leave unset to run without auth (open).
+_API_KEY = (
+    os.environ.get("API_KEY", "").strip()
+    or os.environ.get("GRABX_API_KEY", "").strip()
+)
 
 # Routes that are always public regardless of API_KEY setting.
 _PUBLIC_ROUTES = {"/", "/docs", "/health", "/debug/headers"}
