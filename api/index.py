@@ -961,6 +961,26 @@ def docs():
 # PornHub routes
 # ---------------------------------------------------------------------------
 
+
+def _resolve_hls_uri(uri: str, base_dir: str, parsed_base) -> str:
+    """
+    Resolve a URI found inside an HLS manifest to an absolute URL.
+
+    HLS segments can be:
+      - Already absolute:  https://cdn.example.com/seg-1.ts
+      - Protocol-relative: //cdn.example.com/seg-1.ts
+      - Root-relative:     /videos/seg-1.ts
+      - Relative:          seg-1.ts  or  ../seg-1.ts
+    """
+    if uri.startswith("http://") or uri.startswith("https://"):
+        return uri
+    if uri.startswith("//"):
+        return parsed_base.scheme + ":" + uri
+    if uri.startswith("/"):
+        return f"{parsed_base.scheme}://{parsed_base.netloc}{uri}"
+    # Relative — join with the directory of the manifest URL
+    return base_dir + uri
+
 @app.route("/ph/download", methods=["POST"])
 def ph_download():
     """Extract all quality variants + proxy/download URLs for a PH video."""
@@ -1119,7 +1139,11 @@ def ph_proxy():
     For MP4 (stream mode):  resolves to final CDN URL → 302 redirect.
                             Browser fetches directly, no Render timeout risk.
     For MP4 (dl=1 mode):   streams through server with attachment header.
-    For HLS (.m3u8/.ts):   always streams through server (Referer required per-segment).
+    For HLS master/media manifest (.m3u8):
+                            Fetched through server, all segment and child-playlist
+                            URIs are rewritten to go back through /ph/proxy so the
+                            client never needs the CDN Referer cookie itself.
+    For .ts segments:       streamed through server (Referer required by CDN).
 
     GET /ph/proxy?url=<encoded_url>&dl=0|1
     """
@@ -1128,7 +1152,9 @@ def ph_proxy():
         return jsonify({"status": "error", "message": "'url' query param required"}), 400
 
     download_mode = request.args.get("dl", "0") == "1"
-    is_hls        = ".m3u8" in cdn_url or cdn_url.endswith(".ts") or ".ts?" in cdn_url
+    is_m3u8       = ".m3u8" in cdn_url
+    is_ts         = cdn_url.endswith(".ts") or ".ts?" in cdn_url
+    is_hls        = is_m3u8 or is_ts
 
     try:
         session     = _cffi_session()
@@ -1150,7 +1176,7 @@ def ph_proxy():
                 }), head.status_code
             return redirect(str(head.url), code=302)
 
-        # Download mode or HLS: stream through this server
+        # Fetch the upstream content (HLS manifest or .ts segment, or MP4 download)
         upstream = session.get(
             cdn_url, headers=req_headers, allow_redirects=True,
             timeout=30, http_version=3, doh_url="https://1.1.1.1/dns-query",
@@ -1162,11 +1188,55 @@ def ph_proxy():
                 "message": f"CDN returned HTTP {upstream.status_code}. Link may have expired — re-fetch from /ph/download.",
             }), upstream.status_code
 
+        # ---------------------------------------------------------------
+        # HLS manifest rewriting
+        # For .m3u8 playlists we rewrite every URI line so that each
+        # segment / child playlist is fetched via this proxy (which adds
+        # the required Referer/cookie).  We resolve relative URIs against
+        # the manifest's own URL before re-encoding them.
+        # ---------------------------------------------------------------
+        if is_m3u8:
+            manifest_text = upstream.text
+            base_url = request.host_url.rstrip("/")
+            # The "base" for resolving relative URIs is the directory of the manifest URL
+            parsed_cdn   = urlparse(cdn_url)
+            cdn_base_dir = cdn_url[:cdn_url.rfind("/") + 1]  # everything up to last /
+
+            rewritten_lines = []
+            for line in manifest_text.splitlines():
+                stripped = line.strip()
+                # Skip blank lines and comment/tag lines that don't contain URIs
+                if not stripped or stripped.startswith("#"):
+                    # Rewrite URI= attributes inside tags (e.g. #EXT-X-MEDIA:URI="...")
+                    def _rewrite_uri_attr(m):
+                        raw_uri = m.group(1)
+                        abs_uri = _resolve_hls_uri(raw_uri, cdn_base_dir, parsed_cdn)
+                        return f'URI="{base_url}/ph/proxy?url={quote(abs_uri, safe="")}"'
+                    new_line = re.sub(r'URI="([^"]+)"', _rewrite_uri_attr, line)
+                    rewritten_lines.append(new_line)
+                else:
+                    # It's a URI line (segment or child playlist)
+                    abs_uri = _resolve_hls_uri(stripped, cdn_base_dir, parsed_cdn)
+                    proxy_uri = f"{base_url}/ph/proxy?url={quote(abs_uri, safe='')}"
+                    rewritten_lines.append(proxy_uri)
+
+            rewritten_manifest = "\n".join(rewritten_lines) + "\n"
+            return Response(
+                rewritten_manifest,
+                status=200,
+                content_type="application/vnd.apple.mpegurl; charset=utf-8",
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Cache-Control": "no-cache",
+                },
+            )
+
+        # Non-manifest: stream bytes through (for .ts segments and MP4 downloads)
         path_part    = urlparse(cdn_url).path
         fname        = path_part.split("/")[-1].split("?")[0] or "video"
         if not any(fname.endswith(ext) for ext in (".mp4", ".m3u8", ".ts", ".webm")):
             fname += ".mp4"
-        content_type = "application/vnd.apple.mpegurl" if ".m3u8" in cdn_url else upstream.headers.get("Content-Type", "video/mp4")
+        content_type = upstream.headers.get("Content-Type", "video/mp2t" if is_ts else "video/mp4")
         disposition  = f'attachment; filename="{fname}"' if download_mode else f'inline; filename="{fname}"'
 
         resp_headers = {
