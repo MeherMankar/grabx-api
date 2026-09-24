@@ -1281,6 +1281,17 @@ def ph_proxy():
             "message": "Access denied. Use the proxy_url returned by /ph/download (contains a signed token), or pass a valid X-API-Key header.",
         }), 403
 
+    # If a browser opens a raw HLS proxy URL directly, redirect to the watch
+    # player page instead — browsers can't play .m3u8 natively.
+    viewkey = request.args.get("vk", "")
+    is_m3u8 = ".m3u8" in cdn_url
+    if is_m3u8 and viewkey:
+        accept = request.headers.get("Accept", "")
+        # Browsers send text/html in Accept; media players / XHR don't
+        is_browser = "text/html" in accept and "application/x-mpegurl" not in accept.lower()
+        if is_browser:
+            return redirect(f"{request.host_url.rstrip('/')}/ph/watch/{viewkey}", code=302)
+
     download_mode = request.args.get("dl", "0") == "1"
     is_m3u8       = ".m3u8" in cdn_url
     is_ts         = cdn_url.endswith(".ts") or ".ts?" in cdn_url
@@ -1293,41 +1304,12 @@ def ph_proxy():
             req_headers["Range"] = rng
 
         if not is_hls and not download_mode:
-            # Stream mode for MP4: resolve final URL then redirect browser to CDN directly.
-            head = session.head(
-                cdn_url, headers=req_headers, allow_redirects=True,
-                timeout=15, http_version=3, doh_url="https://1.1.1.1/dns-query",
-            )
-            # Auto-refresh if CDN link is IP-expired
-            if head.status_code in (403, 410, 451):
-                viewkey = request.args.get("vk", "")
-                quality = request.args.get("q", "")
-                if viewkey:
-                    try:
-                        _, fresh_qs = _ph_get_all_qualities(
-                            f"https://www.pornhub.com/view_video.php?viewkey={viewkey}"
-                        )
-                        target = None
-                        if quality:
-                            target = next((x for x in fresh_qs
-                                           if str(x.get("quality")) == quality
-                                           and x.get("format") == "mp4"), None)
-                        if not target:
-                            mp4s   = [x for x in fresh_qs if x.get("format") == "mp4"]
-                            target = mp4s[0] if mp4s else fresh_qs[0]
-                        cdn_url = target["url"]
-                        head = session.head(
-                            cdn_url, headers=req_headers, allow_redirects=True,
-                            timeout=15, http_version=3, doh_url="https://1.1.1.1/dns-query",
-                        )
-                    except Exception:
-                        pass
-            if head.status_code not in (200, 206):
-                return jsonify({
-                    "status": "error",
-                    "message": f"CDN returned HTTP {head.status_code}. Link may have expired — re-fetch from /ph/download.",
-                }), head.status_code
-            return redirect(str(head.url), code=302)
+            # Stream MP4 through the server.
+            # We used to 302-redirect to the CDN directly, but PH CDN URLs are
+            # IP-signed (the `h=` param is bound to the requesting IP). A redirect
+            # sends the browser to the CDN with its own IP → CDN rejects it.
+            # Streaming through the server keeps the CDN interaction server-side.
+            pass  # fall through to the upstream GET below
 
         # Fetch the upstream content (HLS manifest or .ts segment, or MP4 download)
         upstream = session.get(
@@ -1411,6 +1393,7 @@ def ph_proxy():
                 headers={
                     "Access-Control-Allow-Origin": "*",
                     "Cache-Control": "no-cache",
+                    "Content-Disposition": "inline; filename=\"playlist.m3u8\"",
                 },
             )
 
