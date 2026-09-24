@@ -64,7 +64,7 @@ app = Flask(__name__)
 _API_KEY = os.environ.get("API_KEY", "").strip()
 
 # Routes that are always public regardless of API_KEY setting.
-_PUBLIC_ROUTES = {"/", "/docs", "/health"}
+_PUBLIC_ROUTES = {"/", "/docs", "/health", "/debug/headers"}
 
 @app.before_request
 def _check_api_key():
@@ -76,15 +76,27 @@ def _check_api_key():
     # Also allow the PH watch player through without a key (browser navigation)
     if request.path.startswith("/ph/watch/"):
         return
+    # Accept the key from multiple common locations / header spellings
+    auth_header = request.headers.get("Authorization", "")
+    bearer_key  = auth_header.removeprefix("Bearer ").strip() if auth_header.lower().startswith("bearer ") else ""
+
     key = (
-        request.headers.get("X-API-Key")
-        or request.headers.get("X-Api-Key")
-        or request.args.get("api_key")
+        request.headers.get("X-API-Key")        # canonical
+        or request.headers.get("X-Api-Key")      # alternate casing
+        or request.headers.get("apikey")         # some clients use this
+        or request.headers.get("Api-Key")        # another common variant
+        or request.args.get("api_key")           # query param
+        or request.args.get("apikey")            # query param alt
+        or bearer_key                            # Authorization: Bearer <key>
     )
     if not key:
         return jsonify({
             "status": "error",
-            "message": "Missing API key. Pass it as X-API-Key header or ?api_key= query param.",
+            "message": (
+                "Missing API key. Accepted methods: "
+                "X-API-Key header, Authorization: Bearer <key> header, "
+                "or ?api_key= query param."
+            ),
         }), 401
     if key != _API_KEY:
         return jsonify({"status": "error", "message": "Invalid API key."}), 403
@@ -782,6 +794,25 @@ def health():
         "accounts_configured": get_account_count(),
         "auth": "enabled" if _API_KEY else "disabled",
     })
+
+
+@app.route("/debug/headers")
+def debug_headers():
+    """
+    Returns all request headers as received by the server.
+    Always public — use this to verify your client is sending the key correctly.
+    Only active when FLASK_DEBUG=true or DEBUG_HEADERS=true.
+    """
+    if not (os.environ.get("FLASK_DEBUG", "").lower() == "true"
+            or os.environ.get("DEBUG_HEADERS", "").lower() == "true"):
+        return jsonify({"status": "error", "message": "Set DEBUG_HEADERS=true to enable this endpoint."}), 403
+    headers = {k: v for k, v in request.headers}
+    # Mask the actual key value for safety
+    for h in list(headers):
+        if "key" in h.lower() or "auth" in h.lower():
+            v = headers[h]
+            headers[h] = v[:4] + "****" + v[-2:] if len(v) > 6 else "****"
+    return jsonify({"headers": headers, "args": dict(request.args)})
 
 
 # ---------------------------------------------------------------------------
