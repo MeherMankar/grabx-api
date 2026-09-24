@@ -69,6 +69,11 @@ _API_KEY = (
 # Routes that are always public regardless of API_KEY setting.
 _PUBLIC_ROUTES = {"/", "/docs", "/health", "/debug/headers"}
 
+# Route *prefixes* that are always public (no API key AND no token needed).
+# /ph/watch/* — browser player page (can't send headers from <video src>)
+# /proxy and /ph/proxy — token-authenticated by _verify_proxy_token() inside the route
+_PUBLIC_PREFIXES = ("/ph/watch/", "/ph/proxy", "/proxy")
+
 @app.before_request
 def _check_api_key():
     """Enforce X-API-Key header on all non-public routes when API_KEY is set."""
@@ -76,9 +81,8 @@ def _check_api_key():
         return  # auth not configured — open access
     if request.path in _PUBLIC_ROUTES:
         return  # always public
-    # Also allow the PH watch player through without a key (browser navigation)
-    if request.path.startswith("/ph/watch/"):
-        return
+    if request.path.startswith(_PUBLIC_PREFIXES):
+        return  # watch player + proxy stream always public
     # Accept the key from multiple common locations / header spellings
     auth_header = request.headers.get("Authorization", "")
     bearer_key  = auth_header.removeprefix("Bearer ").strip() if auth_header.lower().startswith("bearer ") else ""
@@ -109,8 +113,103 @@ def _check_api_key():
         return jsonify({"status": "error", "message": "Invalid API key."}), 403
 
 # ===========================================================================
-# Terabox — constants & helpers
+# Signed proxy token helpers
 # ===========================================================================
+#
+# When auth is enabled, the bot/client authenticates ONCE with their API key
+# via /download or /ph/download.  The returned proxy_url / download_url carry
+# a short-lived HMAC token so anyone holding that URL (browser, video player,
+# download manager) can stream without needing the raw API key.
+#
+# Token format (URL-safe base64, appended as ?_t=<token>&_e=<expiry>):
+#   HMAC-SHA256( secret=API_KEY, msg="<expiry_unix_int>:<cdn_url>" )
+#
+# Default TTL: 24 hours.  Set PROXY_TOKEN_TTL_HOURS env var to override.
+# ===========================================================================
+
+import hmac
+import hashlib
+import base64
+import time as _time
+
+_TOKEN_TTL = int(os.environ.get("PROXY_TOKEN_TTL_HOURS", "24")) * 3600
+
+
+def _sign_url(cdn_url: str) -> str:
+    """
+    Return a signed proxy URL string (just the _t and _e params to append).
+    cdn_url is the raw CDN URL being protected (used as part of the HMAC msg).
+    """
+    if not _API_KEY:
+        return ""
+    expiry = int(_time.time()) + _TOKEN_TTL
+    msg    = f"{expiry}:{cdn_url}".encode()
+    sig    = hmac.new(_API_KEY.encode(), msg, hashlib.sha256).digest()
+    token  = base64.urlsafe_b64encode(sig).rstrip(b"=").decode()
+    return f"_t={token}&_e={expiry}"
+
+
+def _verify_proxy_token(cdn_url: str) -> bool:
+    """
+    Return True if the request carries a valid signed token for cdn_url,
+    OR if no API_KEY is configured (open mode).
+    """
+    if not _API_KEY:
+        return True
+    token_str = request.args.get("_t", "")
+    expiry_str = request.args.get("_e", "")
+    if not token_str or not expiry_str:
+        return False
+    try:
+        expiry = int(expiry_str)
+    except ValueError:
+        return False
+    if _time.time() > expiry:
+        return False  # expired
+    # Reconstruct expected signature
+    msg      = f"{expiry}:{cdn_url}".encode()
+    expected = hmac.new(_API_KEY.encode(), msg, hashlib.sha256).digest()
+    expected_b64 = base64.urlsafe_b64encode(expected).rstrip(b"=").decode()
+    return hmac.compare_digest(token_str, expected_b64)
+
+
+def _make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "") -> str:
+    """
+    Build a full proxy URL with an embedded signed token.
+    path  — e.g. '/proxy' or '/ph/proxy'
+    extra — any extra query params like '&dl=1'
+    """
+    enc   = quote(cdn_url, safe="")
+    token = _sign_url(cdn_url)
+    if token:
+        return f"{base_url}{path}?url={enc}&{token}{extra}"
+    return f"{base_url}{path}?url={enc}{extra}"
+
+
+def _check_raw_key() -> bool:
+    """
+    Return True if the request carries the valid raw API key in any accepted
+    header / query param.  Used as a fallback in proxy routes so trusted
+    callers can skip the token entirely.
+    """
+    if not _API_KEY:
+        return True  # open mode
+    auth_header = request.headers.get("Authorization", "")
+    bearer_key  = auth_header.removeprefix("Bearer ").strip() if auth_header.lower().startswith("bearer ") else ""
+    key = (
+        request.headers.get("X-API-Key")
+        or request.headers.get("X-Api-Key")
+        or request.headers.get("apikey")
+        or request.headers.get("Api-Key")
+        or request.headers.get("GRABX-API-KEY")
+        or request.headers.get("X-GRABX-API-KEY")
+        or request.headers.get("GRABX_API_KEY")
+        or request.args.get("api_key")
+        or request.args.get("apikey")
+        or request.args.get("grabx_api_key")
+        or bearer_key
+    )
+    return key == _API_KEY
 
 MOBILE_UA = (
     "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
@@ -857,7 +956,7 @@ def download():
             thumbnail  = (thumbs.get("url3") or thumbs.get("url2") or
                           thumbs.get("url1") or thumbs.get("icon") or "")
             size_bytes = int(item.get("size", 0))
-            proxy_url  = f"{base_url}/proxy?url={quote(dlink)}" if dlink else ""
+            proxy_url  = _make_proxy_url(base_url, "/proxy", dlink) if dlink else ""
 
             # Folder path the file lives in (relative to share root)
             folder_path = item.get("path", "")
@@ -922,6 +1021,14 @@ def proxy():
     dlink = request.args.get("url", "").strip()
     if not dlink:
         return jsonify({"status": "error", "message": "'url' query param required"}), 400
+
+    # Token auth: must have a valid signed token OR the raw API key in the header
+    if not _verify_proxy_token(dlink) and not _check_raw_key():
+        return jsonify({
+            "status": "error",
+            "message": "Access denied. Use the proxy_url returned by /download (contains a signed token), or pass a valid X-API-Key header.",
+        }), 403
+
     try:
         ndus     = get_random_ndus()
         session  = build_session(ndus)
@@ -1000,14 +1107,13 @@ def ph_download():
 
         base_url = request.host_url.rstrip("/")
         for q in all_qualities:
-            enc = quote(q["url"])
-            q["proxy_url"]    = f"{base_url}/ph/proxy?url={enc}"
-            q["download_url"] = f"{base_url}/ph/proxy?url={enc}&dl=1"
+            q["proxy_url"]    = _make_proxy_url(base_url, "/ph/proxy", q["url"])
+            q["download_url"] = _make_proxy_url(base_url, "/ph/proxy", q["url"], extra="&dl=1")
 
         mp4s          = [q for q in all_qualities if q["format"] == "mp4"]
         best_url      = mp4s[0]["url"] if mp4s else all_qualities[0]["url"]
-        best_proxy    = f"{base_url}/ph/proxy?url={quote(best_url)}"
-        best_download = f"{base_url}/ph/proxy?url={quote(best_url)}&dl=1"
+        best_proxy    = _make_proxy_url(base_url, "/ph/proxy", best_url)
+        best_download = _make_proxy_url(base_url, "/ph/proxy", best_url, extra="&dl=1")
         watch_url     = f"{base_url}/ph/watch/{meta['viewkey']}" if meta.get("viewkey") else ""
 
         return jsonify({
@@ -1059,8 +1165,8 @@ def ph_watch(viewkey: str):
         if q["format"] == "mp4":
             mp4_opts.append({
                 "label":    f"{q['quality']}p",
-                "proxy":    f"{base_url}/ph/proxy?url={quote(q['url'])}",
-                "download": f"{base_url}/ph/proxy?url={quote(q['url'])}&dl=1",
+                "proxy":    _make_proxy_url(base_url, "/ph/proxy", q["url"]),
+                "download": _make_proxy_url(base_url, "/ph/proxy", q["url"], extra="&dl=1"),
             })
 
     if not mp4_opts:
@@ -1158,6 +1264,13 @@ def ph_proxy():
     if not cdn_url:
         return jsonify({"status": "error", "message": "'url' query param required"}), 400
 
+    # Token auth: must have a valid signed token OR the raw API key in the header
+    if not _verify_proxy_token(cdn_url) and not _check_raw_key():
+        return jsonify({
+            "status": "error",
+            "message": "Access denied. Use the proxy_url returned by /ph/download (contains a signed token), or pass a valid X-API-Key header.",
+        }), 403
+
     download_mode = request.args.get("dl", "0") == "1"
     is_m3u8       = ".m3u8" in cdn_url
     is_ts         = cdn_url.endswith(".ts") or ".ts?" in cdn_url
@@ -1218,13 +1331,13 @@ def ph_proxy():
                     def _rewrite_uri_attr(m):
                         raw_uri = m.group(1)
                         abs_uri = _resolve_hls_uri(raw_uri, cdn_base_dir, parsed_cdn)
-                        return f'URI="{base_url}/ph/proxy?url={quote(abs_uri, safe="")}"'
+                        return f'URI="{_make_proxy_url(base_url, "/ph/proxy", abs_uri)}"'
                     new_line = re.sub(r'URI="([^"]+)"', _rewrite_uri_attr, line)
                     rewritten_lines.append(new_line)
                 else:
                     # It's a URI line (segment or child playlist)
-                    abs_uri = _resolve_hls_uri(stripped, cdn_base_dir, parsed_cdn)
-                    proxy_uri = f"{base_url}/ph/proxy?url={quote(abs_uri, safe='')}"
+                    abs_uri   = _resolve_hls_uri(stripped, cdn_base_dir, parsed_cdn)
+                    proxy_uri = _make_proxy_url(base_url, "/ph/proxy", abs_uri)
                     rewritten_lines.append(proxy_uri)
 
             rewritten_manifest = "\n".join(rewritten_lines) + "\n"
