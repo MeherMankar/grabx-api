@@ -57,6 +57,39 @@ except ImportError:
 app = Flask(__name__)
 
 # ===========================================================================
+# API Key authentication
+# ===========================================================================
+
+# Set API_KEY env var to enable auth. Leave unset to run without auth (open).
+_API_KEY = os.environ.get("API_KEY", "").strip()
+
+# Routes that are always public regardless of API_KEY setting.
+_PUBLIC_ROUTES = {"/", "/docs", "/health"}
+
+@app.before_request
+def _check_api_key():
+    """Enforce X-API-Key header on all non-public routes when API_KEY is set."""
+    if not _API_KEY:
+        return  # auth not configured — open access
+    if request.path in _PUBLIC_ROUTES:
+        return  # always public
+    # Also allow the PH watch player through without a key (browser navigation)
+    if request.path.startswith("/ph/watch/"):
+        return
+    key = (
+        request.headers.get("X-API-Key")
+        or request.headers.get("X-Api-Key")
+        or request.args.get("api_key")
+    )
+    if not key:
+        return jsonify({
+            "status": "error",
+            "message": "Missing API key. Pass it as X-API-Key header or ?api_key= query param.",
+        }), 401
+    if key != _API_KEY:
+        return jsonify({"status": "error", "message": "Invalid API key."}), 403
+
+# ===========================================================================
 # Terabox — constants & helpers
 # ===========================================================================
 
@@ -227,6 +260,149 @@ def _human_size(size_bytes: int) -> str:
             return f"{size_bytes:.2f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.2f} PB"
+
+
+def fetch_folder_file_list(session: req_lib.Session, surl: str,
+                           dir_path: str, share_id: str,
+                           uk: str, sign: str, timestamp: str) -> list:
+    """
+    Fetch file list for a sub-folder inside a Terabox share using the
+    /share/list JSON API.  Returns a list of raw file-info dicts.
+    """
+    url = "https://www.terabox.com/share/list"
+    params = {
+        "app_id":    "250528",
+        "shorturl":  surl,
+        "root":      "0",
+        "dir":       dir_path,
+        "shareid":   share_id,
+        "uk":        uk,
+        "sign":      sign,
+        "timestamp": timestamp,
+        "num":       "100",
+        "page":      "1",
+        "order":     "name",
+        "desc":      "0",
+    }
+    headers = {"User-Agent": DESKTOP_UA, "Referer": "https://www.terabox.com/"}
+    try:
+        resp = session.get(url, params=params, headers=headers, timeout=15)
+        data = resp.json()
+        return data.get("list", [])
+    except Exception:
+        return []
+
+
+def _extract_share_meta(html: str) -> dict:
+    """
+    Pull shareid, uk, sign, timestamp out of window.__INITIAL_STATE__ so we
+    can make authenticated /share/list calls for sub-folders.
+    """
+    m = re.search(
+        r'window\.__INITIAL_STATE__\s*=\s*(\{.+?\})\s*(?:;|</script>)',
+        html, re.DOTALL,
+    )
+    if not m:
+        return {}
+    try:
+        state = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return {}
+    share = state.get("share", {})
+    return {
+        "shareid":   str(share.get("shareid", "")),
+        "uk":        str(share.get("uk", "")),
+        "sign":      share.get("sign", ""),
+        "timestamp": str(share.get("timestamp", "")),
+    }
+
+
+def _collect_files_recursive(session: req_lib.Session, items: list,
+                              surl: str, meta: dict,
+                              depth: int = 0, max_depth: int = 8) -> list:
+    """
+    Walk a Terabox file list recursively.  Folders are expanded via
+    /share/list; files are collected as-is.  Returns a flat list of file dicts
+    each annotated with 'folder_path'.
+    """
+    results = []
+    if depth > max_depth:
+        return results
+
+    for item in items:
+        if str(item.get("isdir", "0")) == "1":
+            # It's a folder — recurse into it
+            dir_path = item.get("path", "")
+            if not dir_path or not all(meta.get(k) for k in ("shareid", "uk")):
+                continue  # can't recurse without share metadata
+            children = fetch_folder_file_list(
+                session, surl, dir_path,
+                meta["shareid"], meta["uk"],
+                meta.get("sign", ""), meta.get("timestamp", ""),
+            )
+            results.extend(
+                _collect_files_recursive(session, children, surl, meta,
+                                         depth + 1, max_depth)
+            )
+        else:
+            results.append(item)
+
+    return results
+
+
+def _extract_video_quality(item: dict) -> dict:
+    """
+    Pull video resolution / quality info from a Terabox file-list item.
+    Terabox embeds video metadata inside the `video_info` sub-object when
+    present.  Falls back to parsing the filename for common patterns.
+    """
+    quality: dict = {}
+
+    video_info = item.get("video_info") or {}
+    if video_info:
+        # width / height
+        w = video_info.get("width") or video_info.get("video_width")
+        h = video_info.get("height") or video_info.get("video_height")
+        if w and h:
+            quality["width"]  = int(w)
+            quality["height"] = int(h)
+            quality["resolution"] = f"{w}x{h}"
+            # derive a standard label
+            for threshold, label in ((2160, "4K"), (1440, "2K"), (1080, "1080p"),
+                                     (720, "720p"), (480, "480p"), (360, "360p")):
+                if int(h) >= threshold:
+                    quality["label"] = label
+                    break
+            else:
+                quality["label"] = f"{h}p"
+
+        dur = video_info.get("duration")
+        if dur:
+            secs = int(float(dur))
+            quality["duration_seconds"] = secs
+            quality["duration"] = f"{secs // 60}:{secs % 60:02d}"
+
+        fps = video_info.get("frame_rate") or video_info.get("fps")
+        if fps:
+            quality["fps"] = round(float(fps), 2)
+
+        vbitrate = video_info.get("bit_rate") or video_info.get("vbitrate")
+        if vbitrate:
+            quality["bitrate_kbps"] = round(int(vbitrate) / 1000, 1)
+
+    if not quality.get("resolution"):
+        # Fallback: scan filename for resolution hints like 1080p / 4K / 2160p
+        fname = item.get("server_filename", "")
+        for pat, label in (
+            (r'4k|2160p', "4K"), (r'2k|1440p', "2K"),
+            (r'1080p', "1080p"), (r'720p', "720p"),
+            (r'480p', "480p"), (r'360p', "360p"),
+        ):
+            if re.search(pat, fname, re.IGNORECASE):
+                quality["label"] = label
+                break
+
+    return quality if quality else {}
 
 
 # ===========================================================================
@@ -465,37 +641,61 @@ def home():
         "message": "Terabox + PornHub Downloader API",
         "creator": "Maintained by MeherMankar (t.me/MeherPatil) | Base by genxnano (t.me/genxnano)",
         "accounts_configured": get_account_count(),
+        "auth": "enabled (X-API-Key required)" if _API_KEY else "disabled (open access)",
         "endpoints": {
             "/download": {
                 "method": "POST",
-                "description": "Get direct download link for a Terabox share URL",
+                "description": "Get direct download link(s) for a Terabox share URL (supports folders, recursive)",
                 "body": {"url": "Terabox share URL"},
+                "auth_required": bool(_API_KEY),
             },
             "/proxy": {
                 "method": "GET",
                 "description": "Proxy-stream a Terabox dlink through this server",
                 "params": {"url": "The dlink URL to proxy"},
+                "auth_required": bool(_API_KEY),
             },
             "/ph/download": {
                 "method": "POST",
                 "description": "Extract video stream/download links from a PornHub watch page",
                 "body": {"url": "PornHub video URL (view_video.php?viewkey=...)"},
+                "auth_required": bool(_API_KEY),
             },
             "/ph/watch/<viewkey>": {
                 "method": "GET",
-                "description": "Browser video player with quality selector and download button",
+                "description": "Browser video player with quality selector and download button (always public)",
                 "example": "/ph/watch/6a165f5d3a96c",
+                "auth_required": False,
             },
             "/ph/proxy": {
                 "method": "GET",
                 "description": "Stream or download a PH CDN URL (adds Referer/cookies); MP4 → 302 redirect, HLS → proxied",
                 "params": {"url": "PH CDN URL", "dl": "1=download, 0=stream (default)"},
+                "auth_required": bool(_API_KEY),
             },
             "/docs": {
                 "method": "GET",
                 "description": "API documentation",
+                "auth_required": False,
+            },
+            "/health": {
+                "method": "GET",
+                "description": "Health check",
+                "auth_required": False,
             },
         },
+    })
+
+
+@app.route("/health")
+def health():
+    import sys, platform
+    return jsonify({
+        "status": "ok",
+        "python": sys.version,
+        "platform": platform.platform(),
+        "accounts_configured": get_account_count(),
+        "auth": "enabled" if _API_KEY else "disabled",
     })
 
 
@@ -517,37 +717,66 @@ def download():
         html, _   = fetch_wap_page(session, surl, share_url)
         file_list = extract_file_info(html)
 
+        # Extract share metadata (shareid, uk, sign, timestamp) needed for
+        # recursive sub-folder fetches via /share/list.
+        share_meta = _extract_share_meta(html)
+        share_meta["surl"] = surl
+
+        # Flatten everything — recurse into any directories found.
+        flat_items = _collect_files_recursive(session, file_list, surl, share_meta)
+
         files    = []
         base_url = request.host_url.rstrip("/")
 
-        for item in file_list:
-            if str(item.get("isdir", "0")) == "1":
-                continue
+        for item in flat_items:
             dlink      = item.get("dlink", "")
             thumbs     = item.get("thumbs") or {}
             thumbnail  = (thumbs.get("url3") or thumbs.get("url2") or
                           thumbs.get("url1") or thumbs.get("icon") or "")
             size_bytes = int(item.get("size", 0))
             proxy_url  = f"{base_url}/proxy?url={quote(dlink)}" if dlink else ""
-            files.append({
-                "filename":   item.get("server_filename", ""),
-                "size_bytes": size_bytes,
-                "size":       _human_size(size_bytes),
-                "thumbnail":  thumbnail,
-                "dlink":      dlink,
-                "proxy_url":  proxy_url,
-                "fs_id":      str(item.get("fs_id", "")),
-            })
+
+            # Folder path the file lives in (relative to share root)
+            folder_path = item.get("path", "")
+            parent_dir  = "/".join(folder_path.split("/")[:-1]) if folder_path else ""
+
+            # Video quality / resolution info (empty dict for non-video files)
+            quality = _extract_video_quality(item)
+
+            file_entry = {
+                "filename":    item.get("server_filename", ""),
+                "folder":      parent_dir,
+                "size_bytes":  size_bytes,
+                "size":        _human_size(size_bytes),
+                "thumbnail":   thumbnail,
+                "dlink":       dlink,
+                "proxy_url":   proxy_url,
+                "fs_id":       str(item.get("fs_id", "")),
+            }
+            if quality:
+                file_entry["video_quality"] = quality
+
+            files.append(file_entry)
 
         if not files:
-            return jsonify({"status": "error", "message": "Share contains only folders or no files."}), 404
+            return jsonify({"status": "error", "message": "Share contains no downloadable files."}), 404
 
         has_dlink = any(f["dlink"] for f in files)
+
+        # Build a human-friendly title
+        if len(files) == 1:
+            title = files[0]["filename"]
+        else:
+            # count unique folders
+            folders = {f["folder"] for f in files if f["folder"]}
+            title = f"{len(files)} files" + (f" across {len(folders)} folders" if folders else "")
+
         return jsonify({
             "status": "success",
             "data": {
-                "title": files[0]["filename"] if len(files) == 1 else f"{len(files)} files",
-                "files": files,
+                "title":              title,
+                "total_files":        len(files),
+                "files":              files,
                 "download_available": has_dlink,
                 "note": (
                     "Use 'dlink' with a download manager (needs Terabox ndus cookie), "
