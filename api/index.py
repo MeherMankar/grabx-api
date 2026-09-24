@@ -103,32 +103,85 @@ DESKTOP_UA = (
 )
 
 TERABOX_DOMAINS = [
-    ".terabox.com", ".dm.terabox.com",
-    ".1024terabox.com", ".1024tera.com",
-    ".teraboxapp.com", ".terabox.app",
-    ".nephobox.com", ".4funbox.co",
-    ".mirrobox.com", ".momerybox.com",
-    ".teraboxlink.com", ".terafileshare.com",
-    ".freeterabox.com", ".teraboxshare.com",
+    # Core brand
+    ".terabox.com", ".dm.terabox.com", ".terabox.app",
+    # 1024 family
+    ".1024terabox.com", ".1024tera.com", ".1024tera.co",
+    # App variants
+    ".teraboxapp.com", ".teraboxapp.net",
+    # Share/link domains
+    ".teraboxlink.com", ".teraboxshare.com", ".terasharefile.com",
+    ".terafileshare.com", ".terasharelink.com",
+    # Mirror / alt brands
+    ".nephobox.com", ".4funbox.co", ".4funbox.com",
+    ".mirrobox.com", ".momerybox.com", ".tibibox.com",
+    ".freeterabox.com", ".teraboxlink.com",
     ".terabox1.com", ".terabox2.com",
-    ".terasharefile.com",
+    # dubox (old Baidu brand name for TeraBox)
+    ".dubox.com", ".dubox.co",
+    # WW/naked subdomains seen in the wild
+    ".ww.mirrobox.com",
 ]
 
+# ---------------------------------------------------------------------------
+# Regex pattern to accept ANY *.terabox.* / known-mirror URL.
+# Used by parse_surl and fetch_wap_page to decide whether a URL looks like
+# a Terabox share link at all.
+# ---------------------------------------------------------------------------
+_TERABOX_URL_RE = re.compile(
+    r"""
+    (?:^|\.)                    # start of hostname or a dot (subdomain boundary)
+    (?:
+        (?:(?:www|ww|m|dm)\.)? # optional common subdomains
+        (?:
+            terabox(?:app|link|share|1|2)?   |  # terabox, teraboxapp, teraboxlink …
+            1024tera(?:box)?                  |  # 1024tera, 1024terabox
+            nephobox                          |
+            4funbox                           |
+            mirrobox                          |
+            momerybox                         |
+            tibibox                           |
+            freeterabox                       |
+            terasharefile                     |
+            terasharelink                     |
+            terafileshare                     |
+            dubox
+        )
+        \.(?:com|co|app|net|org|io)          # any TLD
+    )
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+# Ordered list of hostnames tried when fetching the WAP page.
+# The first entry is the URL's own host (added dynamically in fetch_wap_page).
 TERABOX_HOSTNAMES = [
+    # Most reliable / canonical
     "www.terabox.com",
     "www.1024terabox.com",
     "www.teraboxapp.com",
-    "www.terasharefile.com",
+    # Mirror brands
     "www.nephobox.com",
     "www.4funbox.co",
+    "www.4funbox.com",
     "www.mirrobox.com",
+    "ww.mirrobox.com",
     "www.momerybox.com",
+    "www.tibibox.com",
     "www.freeterabox.com",
+    # Share domains
     "www.teraboxlink.com",
     "www.terafileshare.com",
     "www.teraboxshare.com",
+    "www.terasharefile.com",
+    "www.terasharelink.com",
+    # Numbered mirrors
     "www.terabox1.com",
     "www.terabox2.com",
+    # 1024 family
+    "www.1024tera.com",
+    # dubox
+    "www.dubox.com",
 ]
 
 
@@ -181,7 +234,15 @@ def build_session(ndus: str) -> req_lib.Session:
 
 
 def parse_surl(share_url: str) -> str:
+    # Validate that this actually looks like a Terabox URL
     parsed = urlparse(share_url)
+    host = (parsed.hostname or "").lower()
+    if not _TERABOX_URL_RE.search(host):
+        raise ValueError(
+            f"URL does not appear to be a Terabox share link (host: {host!r}). "
+            "Supported: terabox.com, 1024terabox.com, nephobox.com, 4funbox.co, "
+            "mirrobox.com, momerybox.com, tibibox.com, dubox.com and all their variants."
+        )
     if "/s/" in parsed.path:
         surl = parsed.path.split("/s/")[-1].strip("/")
     else:
@@ -409,19 +470,42 @@ def _extract_video_quality(item: dict) -> dict:
 # PornHub — constants & helpers
 # ===========================================================================
 
-PH_VALID_HOSTS = {
-    "www.pornhub.com", "pornhub.com",
-    "www.pornhub.org", "pornhub.org",
-    "cn.pornhub.com", "de.pornhub.com", "fr.pornhub.com",
-    "es.pornhub.com", "it.pornhub.com", "nl.pornhub.com",
-    "pt.pornhub.com", "pl.pornhub.com", "jp.pornhub.com",
-    "rt.pornhub.com", "cz.pornhub.com",
-    "www.thumbzilla.com", "thumbzilla.com",
+PH_COOKIE_DOMAINS = [".pornhub.com", ".pornhub.net", ".pornhub.org", ".pornhubpremium.com", ".thumbzilla.com"]
+
+PH_AGE_COOKIE = {
+    "accessAgeDisclaimerPH": "1",
+    "accessAgeDisclaimerUK": "1",
+    "accessPH": "1",
+    "age_verified": "1",
+    "platform": "pc",
 }
 
-PH_COOKIE_DOMAINS = [".pornhub.com", ".pornhub.org", ".thumbzilla.com"]
-
-PH_AGE_COOKIE = {"accessAgeDisclaimerPH": "1", "platform": "pc"}
+# ---------------------------------------------------------------------------
+# Regex that matches every official PornHub / Thumbzilla hostname variant.
+# Covers: pornhub.com, pornhubpremium.com, pornhub.net, pornhub.org,
+#         <lang>.pornhub.com (cn/de/fr/es/it/nl/pt/pl/jp/ru/cz/ar/…),
+#         www.thumbzilla.com, thumbzilla.com, and the .onion mirror.
+# ---------------------------------------------------------------------------
+_PH_HOST_RE = re.compile(
+    r"""
+    ^
+    (?:
+        # All pornhub variants
+        (?:[a-z]{2}\.)?              # optional 2-letter language prefix (cn., de., fr. …)
+        (?:www\.)?                   # optional www.
+        pornhub(?:premium)?          # pornhub or pornhubpremium
+        \.(?:com|net|org)            # TLD
+    |
+        # Thumbzilla (PH-owned tube)
+        (?:www\.)?thumbzilla\.com
+    |
+        # .onion mirror (accessed via Tor)
+        www\.pornhubvybmsymdol4iibwgwtkpwmeyd6luq2gxajgjzfjvotyt5zhyd\.onion
+    )
+    $
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
 
 
 def _cffi_session():
@@ -440,10 +524,11 @@ def _ph_validate_url(url: str) -> str:
         url = "https://" + url
         parsed = urlparse(url)
     full_host = (parsed.hostname or "").lower()
-    if full_host not in PH_VALID_HOSTS:
+    if not _PH_HOST_RE.match(full_host):
         raise ValueError(
             f"Not a supported PornHub URL (host: {full_host!r}). "
-            "Expected e.g. https://www.pornhub.com/view_video.php?viewkey=..."
+            "Supported: pornhub.com, pornhubpremium.com, pornhub.net, pornhub.org, "
+            "<lang>.pornhub.com (cn/de/fr/es/it/nl/pt/pl/jp/ru/…), thumbzilla.com."
         )
     qs = parse_qs(parsed.query)
     has_viewkey = bool(qs.get("viewkey"))
