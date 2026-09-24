@@ -88,8 +88,12 @@ def _check_api_key():
         or request.headers.get("X-Api-Key")      # alternate casing
         or request.headers.get("apikey")         # some clients use this
         or request.headers.get("Api-Key")        # another common variant
+        or request.headers.get("GRABX-API-KEY")  # grabx-specific header
+        or request.headers.get("X-GRABX-API-KEY")
+        or request.headers.get("GRABX_API_KEY")  # underscored variant (non-standard but used by some bots)
         or request.args.get("api_key")           # query param
         or request.args.get("apikey")            # query param alt
+        or request.args.get("grabx_api_key")     # query param grabx variant
         or bearer_key                            # Authorization: Bearer <key>
     )
     if not key:
