@@ -22,11 +22,11 @@
 // ---------------------------------------------------------------------------
 
 async function verifyToken(cdnUrl, tokenB64, expiryStr) {
+  const apiKey = (globalThis.API_KEY || "").trim();
+  if (!apiKey) return true; // open mode — no key configured
+
   const expiry = parseInt(expiryStr, 10);
   if (isNaN(expiry) || Date.now() / 1000 > expiry) return false;
-
-  const apiKey = (typeof API_KEY !== "undefined" ? API_KEY : "").trim();
-  if (!apiKey) return true; // open mode
 
   const msg    = `${expiry}:${cdnUrl}`;
   const key    = await crypto.subtle.importKey(
@@ -129,7 +129,7 @@ async function handleRequest(request) {
   }
 
   // Auth check
-  const apiKey = (typeof API_KEY !== "undefined" ? API_KEY : "").trim();
+  const apiKey = (globalThis.API_KEY || "").trim();
   if (apiKey) {
     const valid = await verifyToken(cdnUrl, tokenB64, expiryStr);
     if (!valid) {
@@ -248,10 +248,8 @@ async function handleRequest(request) {
 
 export default {
   async fetch(request, env, ctx) {
-    // Make API_KEY available from env binding
-    if (env && env.API_KEY) {
-      globalThis.API_KEY = env.API_KEY;
-    }
+    // Make env bindings available globally
+    globalThis.API_KEY = (env && env.API_KEY) ? env.API_KEY : "";
 
     if (request.method === "OPTIONS") {
       return new Response(null, {
@@ -261,6 +259,17 @@ export default {
           "Access-Control-Allow-Headers": "Range, Content-Type",
           "Access-Control-Max-Age":       "86400",
         },
+      });
+    }
+
+    // Root path — health check
+    if (new URL(request.url).pathname === "/") {
+      return new Response(JSON.stringify({
+        status: "ok",
+        service: "grabx-proxy worker",
+        auth: globalThis.API_KEY ? "enabled" : "disabled (API_KEY not set)",
+      }), {
+        headers: { "Content-Type": "application/json" },
       });
     }
 
