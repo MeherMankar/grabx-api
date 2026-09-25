@@ -84,7 +84,8 @@ _PUBLIC_ROUTES = {"/", "/docs", "/health", "/debug/headers"}
 # Route *prefixes* that are always public (no API key AND no token needed).
 # /ph/watch/* — browser player page (can't send headers from <video src>)
 # /proxy and /ph/proxy — token-authenticated by _verify_proxy_token() inside the route
-_PUBLIC_PREFIXES = ("/ph/watch/", "/ph/proxy", "/proxy")
+_PUBLIC_PREFIXES = ("/ph/watch/", "/ph/proxy", "/proxy", "/adult/proxy",
+                   "/xv/watch", "/xnxx/watch", "/xh/watch")
 
 @app.before_request
 def _check_api_key():
@@ -943,6 +944,48 @@ def home():
                 "description": "Health check",
                 "auth_required": False,
             },
+            "/xv/download": {
+                "method": "POST",
+                "description": "Extract stream/download links from an Xvideos video",
+                "body": {"url": "Xvideos video URL"},
+                "auth_required": bool(_API_KEY),
+            },
+            "/xv/watch": {
+                "method": "GET",
+                "description": "Browser video player for Xvideos",
+                "params": {"url": "Xvideos video URL"},
+                "auth_required": False,
+            },
+            "/xnxx/download": {
+                "method": "POST",
+                "description": "Extract stream/download links from an XNXX video",
+                "body": {"url": "XNXX video URL"},
+                "auth_required": bool(_API_KEY),
+            },
+            "/xnxx/watch": {
+                "method": "GET",
+                "description": "Browser video player for XNXX",
+                "params": {"url": "XNXX video URL"},
+                "auth_required": False,
+            },
+            "/xh/download": {
+                "method": "POST",
+                "description": "Extract stream/download links from an XHamster video",
+                "body": {"url": "XHamster video URL"},
+                "auth_required": bool(_API_KEY),
+            },
+            "/xh/watch": {
+                "method": "GET",
+                "description": "Browser video player for XHamster",
+                "params": {"url": "XHamster video URL"},
+                "auth_required": False,
+            },
+            "/adult/proxy": {
+                "method": "GET",
+                "description": "Proxy CDN streams for Xvideos / XNXX / XHamster (token-authenticated)",
+                "params": {"url": "CDN URL", "dl": "1=download, 0=stream"},
+                "auth_required": False,
+            },
         },
     })
 
@@ -1591,6 +1634,718 @@ def ph_proxy():
         )
     except Exception as e:
         return jsonify({"status": "error", "message": f"Proxy error: {e}"}), 502
+
+
+
+# ===========================================================================
+# Xvideos + XNXX — helpers
+# ===========================================================================
+#
+# Both sites embed stream URLs in html5player.setVideoUrl*() JS calls.
+# Xvideos uses xvideos-cdn.com, XNXX uses xnxx-cdn.com.
+# No second-step API call needed — all qualities are directly in the page.
+# ===========================================================================
+
+_XV_VALID_HOSTS_RE = re.compile(
+    r'^(?:www\.)?xvideos(?:\d+)?\.com$', re.IGNORECASE
+)
+_XNXX_VALID_HOSTS_RE = re.compile(
+    r'^(?:www\.)?xnxx\.com$', re.IGNORECASE
+)
+
+_XV_AGE_COOKIES   = {}  # Xvideos has no age gate for most content
+_XNXX_AGE_COOKIES = {"nv_age_check": "1"}
+
+def _xv_cffi_session(cookies: dict = None):
+    from curl_cffi import requests as cffi_req
+    session = cffi_req.Session(impersonate="chrome124")
+    if cookies:
+        for domain in (".xvideos.com", ".xvideos2.com", ".xvideos3.com"):
+            for name, value in cookies.items():
+                session.cookies.set(name, value, domain=domain)
+    return session
+
+def _xnxx_cffi_session():
+    from curl_cffi import requests as cffi_req
+    session = cffi_req.Session(impersonate="chrome124")
+    for domain in (".xnxx.com",):
+        for name, value in _XNXX_AGE_COOKIES.items():
+            session.cookies.set(name, value, domain=domain)
+    return session
+
+def _xv_fetch_page(url: str, session=None) -> str:
+    try:
+        if session is None:
+            session = _xv_cffi_session()
+        resp = session.get(
+            url, allow_redirects=True, timeout=20,
+            http_version=3, doh_url="https://1.1.1.1/dns-query",
+        )
+    except Exception as e:
+        raise ValueError(f"Network error fetching page: {e}")
+    if resp.status_code != 200:
+        raise ValueError(f"Site returned HTTP {resp.status_code}. Video may be private or deleted.")
+    return resp.text
+
+
+def _xv_extract_data(html: str, site_domain: str) -> dict:
+    """
+    Extract stream URLs from html5player JS calls and window.xv.conf fallback.
+    Works for both Xvideos and XNXX.
+    """
+    data: dict = {}
+
+    # html5player.setVideoUrl*() calls
+    patterns = {
+        "url_low":  r"html5player\.setVideoUrlLow\s*\(\s*['\"](.+?)['\"]\s*\)",
+        "url_high": r"html5player\.setVideoUrlHigh\s*\(\s*['\"](.+?)['\"]\s*\)",
+        "url_hls":  r"html5player\.setVideoUrlHls\s*\(\s*['\"](.+?)['\"]\s*\)",
+        "title":    r"html5player\.setVideoTitle\s*\(\s*['\"](.+?)['\"]\s*\)",
+        "thumb":    r"html5player\.setThumbUrl\s*\(\s*['\"](.+?)['\"]\s*\)",
+        "duration": r"html5player\.setVideoDuration\s*\(\s*(\d+)\s*\)",
+    }
+    for key, pat in patterns.items():
+        m = re.search(pat, html, re.IGNORECASE)
+        if m:
+            data[key] = m.group(1)
+
+    # Fallback: window.xv.conf JSON
+    if not data.get("url_low") and not data.get("url_high"):
+        m = re.search(r'window\.xv\.conf\s*=\s*(\{.+?\})\s*;', html, re.DOTALL)
+        if m:
+            try:
+                conf = json.loads(m.group(1))
+                for k in ("url", "url_low", "url_high", "url_hls"):
+                    if k in conf:
+                        data[k] = conf[k]
+            except json.JSONDecodeError:
+                pass
+
+    # OG metadata fallback for title/thumb
+    if not data.get("title"):
+        m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html)
+        if m:
+            data["title"] = m.group(1).strip()
+    if not data.get("thumb"):
+        m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html)
+        if m:
+            data["thumb"] = m.group(1).strip()
+    if not data.get("duration"):
+        m = re.search(r'"duration"\s*:\s*"?(\d+)"?', html)
+        if m:
+            data["duration"] = m.group(1)
+
+    if not data.get("url_low") and not data.get("url_high") and not data.get("url"):
+        raise ValueError(
+            f"No video stream URLs found. "
+            f"Video may be premium-only, deleted, or {site_domain} page structure changed."
+        )
+
+    return data
+
+
+def _xv_build_qualities(data: dict, base_url: str, path: str,
+                        viewkey: str, referer: str) -> list:
+    """Convert extracted data dict into the standard qualities list."""
+    qualities = []
+    url_map = {
+        "360": data.get("url_low") or data.get("url"),
+        "480": data.get("url_high"),
+        "hls": data.get("url_hls"),
+    }
+    for label, url in url_map.items():
+        if not url:
+            continue
+        fmt = "hls" if label == "hls" else "mp4"
+        ql  = label if label != "hls" else "hls"
+        qualities.append({
+            "quality":      ql,
+            "format":       fmt,
+            "url":          url,
+            "proxy_url":    _make_proxy_url(base_url, path, url, viewkey=viewkey, quality=ql),
+            "download_url": _make_proxy_url(base_url, path, url, extra="&dl=1", viewkey=viewkey, quality=ql),
+        })
+    # Sort MP4 best-first
+    qualities.sort(key=lambda e: (0, -int(e["quality"])) if e["quality"].isdigit() else (1, 0))
+    return qualities
+
+
+def _xv_get_all_qualities(url: str):
+    """Full pipeline for Xvideos."""
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        url = "https://" + url
+        parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not _XV_VALID_HOSTS_RE.match(host):
+        raise ValueError(f"Not a supported Xvideos URL (host: {host!r}).")
+    session = _xv_cffi_session(_XV_AGE_COOKIES)
+    html    = _xv_fetch_page(url, session)
+    data    = _xv_extract_data(html, "xvideos.com")
+    secs    = int(data.get("duration", 0) or 0)
+    meta    = {
+        "title":            data.get("title", "Unknown Title"),
+        "thumbnail":        data.get("thumb", ""),
+        "duration":         f"{secs // 60}:{secs % 60:02d}" if secs else "",
+        "duration_seconds": secs,
+        "video_url":        url,
+    }
+    return meta, data
+
+
+def _xnxx_get_all_qualities(url: str):
+    """Full pipeline for XNXX."""
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        url = "https://" + url
+        parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not _XNXX_VALID_HOSTS_RE.match(host):
+        raise ValueError(f"Not a supported XNXX URL (host: {host!r}).")
+    session = _xnxx_cffi_session()
+    html    = _xv_fetch_page(url, session)
+    data    = _xv_extract_data(html, "xnxx.com")
+    secs    = int(data.get("duration", 0) or 0)
+    meta    = {
+        "title":            data.get("title", "Unknown Title"),
+        "thumbnail":        data.get("thumb", ""),
+        "duration":         f"{secs // 60}:{secs % 60:02d}" if secs else "",
+        "duration_seconds": secs,
+        "video_url":        url,
+    }
+    return meta, data
+
+
+# ===========================================================================
+# XHamster — helpers
+# ===========================================================================
+#
+# XHamster embeds all stream data in window.initials JSON on the watch page.
+# The mp4 array contains all quality variants directly — no second API call.
+# ===========================================================================
+
+_XH_VALID_HOSTS_RE = re.compile(
+    r'^(?:[a-z]{2}\.)?(?:www\.)?xhamster(?:\d+)?\.(?:com|desi|one|xxx|net)$',
+    re.IGNORECASE,
+)
+_XH_COOKIE_DOMAINS = [".xhamster.com", ".xhamster.desi", ".xhamster.one",
+                      ".xhamster.xxx", ".xhamster.net"]
+_XH_AGE_COOKIES = {
+    "adc_ga_v2":         "1",
+    "is_adult_confirmed": "1",
+    "xhamster-language": "en",
+    "platform":          "desktop",
+}
+
+def _xh_cffi_session():
+    from curl_cffi import requests as cffi_req
+    session = cffi_req.Session(impersonate="chrome124")
+    for domain in _XH_COOKIE_DOMAINS:
+        for name, value in _XH_AGE_COOKIES.items():
+            session.cookies.set(name, value, domain=domain)
+    return session
+
+
+def _xh_extract_data(html: str) -> dict:
+    """Extract stream URLs from window.initials JSON."""
+    m = re.search(r'window\.initials\s*=\s*(\{.+?\})\s*;', html, re.DOTALL)
+    if not m:
+        raise ValueError(
+            "Could not find window.initials in XHamster page. "
+            "Page structure may have changed or video is unavailable."
+        )
+    try:
+        initials = json.loads(m.group(1))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse XHamster initials JSON: {e}")
+
+    sources = (
+        initials.get("xplayerSettings", {}).get("sources", {})
+        or initials.get("videoModel", {}).get("sources", {})
+    )
+    if not sources:
+        raise ValueError("No sources found in XHamster initials JSON.")
+
+    video_model = initials.get("videoModel", {})
+    secs = int(video_model.get("duration", 0) or 0)
+
+    qualities = []
+    for item in sources.get("mp4", []):
+        url = (item.get("url") or item.get("videoUrl") or "").strip()
+        ql  = str(item.get("quality") or "").replace("p", "").strip()
+        if url and ql:
+            qualities.append({"quality": ql, "format": "mp4", "url": url})
+
+    hls_src = sources.get("hls") or {}
+    hls_url = (hls_src.get("url") or hls_src.get("xplayerSources", {}).get("hls", {}).get("url") or "").strip()
+    if hls_url:
+        qualities.append({"quality": "hls", "format": "hls", "url": hls_url})
+
+    qualities.sort(key=lambda e: (0, -int(e["quality"])) if e["quality"].isdigit() else (1, 0))
+
+    if not qualities:
+        raise ValueError("No stream URLs found in XHamster sources.")
+
+    return {
+        "title":            video_model.get("title", "Unknown Title"),
+        "thumbnail":        video_model.get("thumbURL", video_model.get("thumb", "")),
+        "duration":         f"{secs // 60}:{secs % 60:02d}" if secs else "",
+        "duration_seconds": secs,
+        "qualities":        qualities,
+    }
+
+
+def _xh_get_all_qualities(url: str) -> dict:
+    """Full pipeline for XHamster."""
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        url = "https://" + url
+        parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not _XH_VALID_HOSTS_RE.match(host):
+        raise ValueError(f"Not a supported XHamster URL (host: {host!r}).")
+    session = _xh_cffi_session()
+    html    = _xv_fetch_page(url, session)
+    return _xh_extract_data(html)
+
+
+# ===========================================================================
+# Generic adult-site proxy (/adult/proxy)
+# Works for Xvideos, XNXX, XHamster CDN streams — attaches correct Referer.
+# ===========================================================================
+
+# Map CDN hostname patterns → Referer to send
+_ADULT_CDN_REFERERS = [
+    (re.compile(r'xvideos-cdn\.com',  re.I), "https://www.xvideos.com/"),
+    (re.compile(r'xnxx-cdn\.com',     re.I), "https://www.xnxx.com/"),
+    (re.compile(r'xhmscdn\d*\.com',   re.I), "https://xhamster.com/"),
+    (re.compile(r'xhstorage\.com',    re.I), "https://xhamster.com/"),
+    (re.compile(r'xhamster\.com',     re.I), "https://xhamster.com/"),
+]
+
+def _adult_referer(cdn_url: str) -> str:
+    host = (urlparse(cdn_url).hostname or "").lower()
+    for pat, ref in _ADULT_CDN_REFERERS:
+        if pat.search(host):
+            return ref
+    return "https://www.xvideos.com/"  # safe default
+
+
+# ===========================================================================
+# Xvideos routes
+# ===========================================================================
+
+@app.route("/xv/download", methods=["POST"])
+def xv_download():
+    """Extract all stream/download URLs for an Xvideos video."""
+    body = request.get_json(silent=True)
+    if not body or "url" not in body:
+        return jsonify({"status": "error", "message": "'url' field is required in JSON body"}), 400
+    try:
+        base_url = request.host_url.rstrip("/")
+        meta, data = _xv_get_all_qualities(body["url"].strip())
+        qualities = _xv_build_qualities(data, base_url, "/adult/proxy",
+                                         viewkey="", referer="https://www.xvideos.com/")
+        if not qualities:
+            return jsonify({"status": "error", "message": "No streams found."}), 404
+        best = qualities[0]
+        return jsonify({
+            "status": "success",
+            "data": {
+                "title":             meta["title"],
+                "thumbnail":         meta["thumbnail"],
+                "duration":          meta["duration"],
+                "duration_seconds":  meta["duration_seconds"],
+                "qualities":         qualities,
+                "best_proxy_url":    best["proxy_url"],
+                "best_download_url": best["download_url"],
+                "note": "Use best_proxy_url to stream or best_download_url to download.",
+            },
+        })
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Internal error: {e}"}), 500
+
+
+@app.route("/xv/watch")
+def xv_watch():
+    """Browser video player for an Xvideos video. Pass ?url=<video_url>"""
+    url = request.args.get("url", "").strip()
+    if not url:
+        return "<h2>Missing ?url= parameter</h2>", 400
+    try:
+        base_url = request.host_url.rstrip("/")
+        meta, data = _xv_get_all_qualities(url)
+        qualities = _xv_build_qualities(data, base_url, "/adult/proxy",
+                                         viewkey="", referer="https://www.xvideos.com/")
+        if not qualities:
+            return "<h2>No streams found for this video.</h2>", 404
+        return _render_watch_page(meta, qualities)
+    except Exception as e:
+        return f"<h2 style='color:#f55'>Error: {e}</h2>", 500
+
+
+# ===========================================================================
+# XNXX routes
+# ===========================================================================
+
+@app.route("/xnxx/download", methods=["POST"])
+def xnxx_download():
+    """Extract all stream/download URLs for an XNXX video."""
+    body = request.get_json(silent=True)
+    if not body or "url" not in body:
+        return jsonify({"status": "error", "message": "'url' field is required in JSON body"}), 400
+    try:
+        base_url = request.host_url.rstrip("/")
+        meta, data = _xnxx_get_all_qualities(body["url"].strip())
+        qualities = _xv_build_qualities(data, base_url, "/adult/proxy",
+                                         viewkey="", referer="https://www.xnxx.com/")
+        if not qualities:
+            return jsonify({"status": "error", "message": "No streams found."}), 404
+        best = qualities[0]
+        return jsonify({
+            "status": "success",
+            "data": {
+                "title":             meta["title"],
+                "thumbnail":         meta["thumbnail"],
+                "duration":          meta["duration"],
+                "duration_seconds":  meta["duration_seconds"],
+                "qualities":         qualities,
+                "best_proxy_url":    best["proxy_url"],
+                "best_download_url": best["download_url"],
+                "note": "Use best_proxy_url to stream or best_download_url to download.",
+            },
+        })
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Internal error: {e}"}), 500
+
+
+@app.route("/xnxx/watch")
+def xnxx_watch():
+    """Browser video player for an XNXX video. Pass ?url=<video_url>"""
+    url = request.args.get("url", "").strip()
+    if not url:
+        return "<h2>Missing ?url= parameter</h2>", 400
+    try:
+        base_url = request.host_url.rstrip("/")
+        meta, data = _xnxx_get_all_qualities(url)
+        qualities = _xv_build_qualities(data, base_url, "/adult/proxy",
+                                         viewkey="", referer="https://www.xnxx.com/")
+        if not qualities:
+            return "<h2>No streams found for this video.</h2>", 404
+        return _render_watch_page(meta, qualities)
+    except Exception as e:
+        return f"<h2 style='color:#f55'>Error: {e}</h2>", 500
+
+
+# ===========================================================================
+# XHamster routes
+# ===========================================================================
+
+@app.route("/xh/download", methods=["POST"])
+def xh_download():
+    """Extract all stream/download URLs for an XHamster video."""
+    body = request.get_json(silent=True)
+    if not body or "url" not in body:
+        return jsonify({"status": "error", "message": "'url' field is required in JSON body"}), 400
+    try:
+        base_url = request.host_url.rstrip("/")
+        result   = _xh_get_all_qualities(body["url"].strip())
+        qualities = []
+        for q in result["qualities"]:
+            ql = q["quality"]
+            qualities.append({
+                **q,
+                "proxy_url":    _make_proxy_url(base_url, "/adult/proxy", q["url"], quality=ql),
+                "download_url": _make_proxy_url(base_url, "/adult/proxy", q["url"], extra="&dl=1", quality=ql),
+            })
+        if not qualities:
+            return jsonify({"status": "error", "message": "No streams found."}), 404
+        best = next((q for q in qualities if q["format"] == "mp4"), qualities[0])
+        return jsonify({
+            "status": "success",
+            "data": {
+                "title":             result["title"],
+                "thumbnail":         result["thumbnail"],
+                "duration":          result["duration"],
+                "duration_seconds":  result["duration_seconds"],
+                "qualities":         qualities,
+                "best_proxy_url":    best["proxy_url"],
+                "best_download_url": best["download_url"],
+                "note": "Use best_proxy_url to stream or best_download_url to download.",
+            },
+        })
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Internal error: {e}"}), 500
+
+
+@app.route("/xh/watch")
+def xh_watch():
+    """Browser video player for an XHamster video. Pass ?url=<video_url>"""
+    url = request.args.get("url", "").strip()
+    if not url:
+        return "<h2>Missing ?url= parameter</h2>", 400
+    try:
+        base_url = request.host_url.rstrip("/")
+        result   = _xh_get_all_qualities(url)
+        qualities = []
+        for q in result["qualities"]:
+            ql = q["quality"]
+            qualities.append({
+                **q,
+                "proxy_url":    _make_proxy_url(base_url, "/adult/proxy", q["url"], quality=ql),
+                "download_url": _make_proxy_url(base_url, "/adult/proxy", q["url"], extra="&dl=1", quality=ql),
+            })
+        if not qualities:
+            return "<h2>No streams found for this video.</h2>", 404
+        return _render_watch_page(result, qualities)
+    except Exception as e:
+        return f"<h2 style='color:#f55'>Error: {e}</h2>", 500
+
+
+# ===========================================================================
+# Generic adult CDN proxy (/adult/proxy)
+# Handles Xvideos, XNXX, XHamster CDN streams — attaches correct Referer.
+# Auth: same token system as /ph/proxy.
+# ===========================================================================
+
+@app.route("/adult/proxy")
+def adult_proxy():
+    """
+    Proxy CDN streams for Xvideos / XNXX / XHamster.
+    Automatically detects the correct Referer from the CDN hostname.
+    """
+    cdn_url = request.args.get("url", "").strip()
+    if not cdn_url:
+        return jsonify({"status": "error", "message": "'url' query param required"}), 400
+
+    if not _verify_proxy_token(cdn_url) and not _check_raw_key():
+        return jsonify({"status": "error",
+                        "message": "Access denied. Use the proxy_url from the download endpoint."}), 403
+
+    download_mode = request.args.get("dl", "0") == "1"
+    is_m3u8 = ".m3u8" in cdn_url
+    is_ts   = cdn_url.endswith(".ts") or ".ts?" in cdn_url
+
+    try:
+        referer = _adult_referer(cdn_url)
+        session = _cffi_session()  # reuse curl_cffi for uniform TLS
+        headers = {
+            "Referer":  referer,
+            "Origin":   referer.rstrip("/"),
+            "Accept":   "*/*",
+            "Accept-Encoding": "identity",
+        }
+        if rng := request.headers.get("Range"):
+            headers["Range"] = rng
+
+        upstream = session.get(
+            cdn_url, headers=headers, allow_redirects=True,
+            timeout=30, http_version=3, doh_url="https://1.1.1.1/dns-query",
+            stream=True,
+        )
+        if upstream.status_code not in (200, 206):
+            return jsonify({"status": "error",
+                            "message": f"CDN returned HTTP {upstream.status_code}."}), upstream.status_code
+
+        # HLS manifest rewriting
+        if is_m3u8:
+            manifest = upstream.text.strip()
+            if not manifest or len(manifest) < 10:
+                return jsonify({"status": "error", "message": "CDN returned empty manifest."}), 502
+            base_url_host  = request.host_url.rstrip("/")
+            parsed_cdn     = urlparse(cdn_url)
+            cdn_base_dir   = cdn_url[:cdn_url.rfind("/") + 1]
+            token_params   = {
+                k: request.args.get(k, "")
+                for k in ("_t", "_e", "vk", "q")
+            }
+            rewritten_lines = []
+            for line in manifest.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    rewritten_lines.append(line)
+                    continue
+                if stripped.startswith("#"):
+                    def _rw(m, _base=cdn_base_dir, _parsed=parsed_cdn, _host=base_url_host):
+                        abs_uri = _resolve_hls_uri(m.group(1), _base, _parsed)
+                        return f'URI="{_make_proxy_url(_host, "/adult/proxy", abs_uri)}"'
+                    rewritten_lines.append(re.sub(r'URI="([^"]+)"', _rw, line))
+                else:
+                    abs_uri = _resolve_hls_uri(stripped, cdn_base_dir, parsed_cdn)
+                    rewritten_lines.append(_make_proxy_url(base_url_host, "/adult/proxy", abs_uri))
+            return Response(
+                "\n".join(rewritten_lines) + "\n",
+                status=200,
+                content_type="application/vnd.apple.mpegurl; charset=utf-8",
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache",
+                         "Content-Disposition": 'inline; filename="playlist.m3u8"'},
+            )
+
+        path_part = urlparse(cdn_url).path
+        fname     = path_part.split("/")[-1].split("?")[0] or "video"
+        if not any(fname.endswith(ext) for ext in (".mp4", ".webm", ".ts", ".m3u8")):
+            fname += ".mp4"
+        content_type = upstream.headers.get("Content-Type", "video/mp2t" if is_ts else "video/mp4")
+        disposition  = f'attachment; filename="{fname}"' if download_mode else f'inline; filename="{fname}"'
+        resp_headers = {
+            "Content-Disposition":         disposition,
+            "Accept-Ranges":               "bytes",
+            "Access-Control-Allow-Origin": "*",
+        }
+        for h in ("Content-Length", "Content-Range"):
+            if v := upstream.headers.get(h):
+                resp_headers[h] = v
+
+        def generate():
+            for chunk in upstream.iter_content(chunk_size=65536):
+                if chunk:
+                    yield chunk
+
+        return Response(stream_with_context(generate()),
+                        status=upstream.status_code,
+                        content_type=content_type,
+                        headers=resp_headers)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Proxy error: {e}"}), 502
+
+
+# ===========================================================================
+# Shared watch page renderer
+# ===========================================================================
+
+def _render_watch_page(meta: dict, qualities: list):
+    """Render the HLS.js player HTML for any site."""
+    title     = meta.get("title", "Video")
+    thumbnail = meta.get("thumbnail", "")
+    duration  = meta.get("duration", "")
+
+    sorted_opts = sorted(
+        qualities,
+        key=lambda q: (0, -int(q["quality"])) if q["quality"].isdigit() else (1, 0),
+    )
+
+    options_html = "\n".join(
+        f'<option value="{quote(o.get("proxy_url",""), safe="")}" '
+        f'data-fmt="{o["format"]}" '
+        f'data-dl="{quote(o.get("download_url",""), safe="")}">'
+        f'{o["quality"]}{"p" if o["quality"].isdigit() else ""} {o["format"].upper()}'
+        f'</option>'
+        for o in sorted_opts
+    )
+
+    best         = sorted_opts[0]
+    best_stream  = best.get("proxy_url", "")
+    best_dl      = best.get("download_url", "")
+    best_fmt     = best.get("format", "mp4")
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>{title}</title>
+  <style>
+    *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+    body{{background:#0f0f0f;color:#eee;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+          min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:24px 16px 48px}}
+    .container{{width:100%;max-width:960px}}
+    h1{{font-size:1.15rem;font-weight:600;margin-bottom:14px;line-height:1.4;color:#fff}}
+    .player-wrap{{position:relative;width:100%;background:#000;border-radius:8px;overflow:hidden}}
+    video{{width:100%;display:block;max-height:540px;background:#000}}
+    .controls{{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}}
+    select{{background:#1e1e1e;color:#eee;border:1px solid #444;border-radius:6px;
+            padding:8px 12px;font-size:.9rem;cursor:pointer;flex:1;min-width:120px}}
+    select:focus{{outline:none;border-color:#f90}}
+    .btn{{display:inline-flex;align-items:center;gap:6px;font-weight:700;font-size:.9rem;
+          padding:9px 18px;border-radius:6px;text-decoration:none;white-space:nowrap;
+          transition:background .15s;cursor:pointer;border:none}}
+    .btn-dl{{background:#f90;color:#000}}.btn-dl:hover{{background:#e88600}}
+    .btn-dl:disabled{{background:#666;cursor:not-allowed}}
+    .meta{{margin-top:10px;font-size:.8rem;color:#666}}
+    .note{{margin-top:16px;font-size:.75rem;color:#444;text-align:center}}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>{title}</h1>
+    <div class="player-wrap">
+      <video id="player" controls preload="metadata" poster="{thumbnail}">
+        Your browser does not support HTML5 video.
+      </video>
+    </div>
+    <div class="controls">
+      <select id="qualitySelect">{options_html}</select>
+      <button id="dlBtn" class="btn btn-dl">&#8595; Download</button>
+    </div>
+    <div class="meta">{'Duration: ' + duration + ' &nbsp;·&nbsp; ' if duration else ''}Powered by <a href="https://github.com/MeherMankar/grabx-api" target="_blank" style="color:#f90;text-decoration:none">GrabX API</a></div>
+    <p class="note">Tip: right-click the video &rarr; "Save video as" to download directly.</p>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+  <script>
+    const video = document.getElementById('player');
+    const sel   = document.getElementById('qualitySelect');
+    const dlBtn = document.getElementById('dlBtn');
+    let hls     = null;
+    let currentDlUrl = '{best_dl}';
+    let currentFmt   = '{best_fmt}';
+
+    function loadSrc(streamUrl, fmt, dlUrl) {{
+      const isHls = fmt === 'hls' || streamUrl.includes('.m3u8');
+      currentDlUrl = dlUrl;
+      currentFmt   = fmt;
+      if (hls) {{ hls.destroy(); hls = null; }}
+      if (isHls) {{
+        if (Hls.isSupported()) {{
+          hls = new Hls({{ enableWorker: true }});
+          hls.loadSource(streamUrl);
+          hls.attachMedia(video);
+          hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {{}}));
+        }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
+          video.src = streamUrl;
+          video.play().catch(() => {{}});
+        }}
+      }} else {{
+        video.src = streamUrl;
+        video.load();
+      }}
+    }}
+
+    dlBtn.addEventListener('click', async function() {{
+      if (currentFmt === 'hls') {{ window.open(currentDlUrl, '_blank'); return; }}
+      dlBtn.textContent = 'Preparing...';
+      dlBtn.disabled = true;
+      try {{
+        const resp = await fetch(currentDlUrl);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const blob = await resp.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        const cd = resp.headers.get('Content-Disposition') || '';
+        const match = cd.match(/filename[*]?=["']?([^"';\\n]+)/i);
+        a.download = match ? match[1].trim() : 'video.mp4';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+      }} catch (e) {{ window.open(currentDlUrl, '_blank'); }}
+      finally {{ dlBtn.textContent = '↓ Download'; dlBtn.disabled = false; }}
+    }});
+
+    const first = sel.options[sel.selectedIndex];
+    loadSrc(first.value, first.dataset.fmt, first.dataset.dl);
+    sel.addEventListener('change', function() {{
+      const opt = this.options[this.selectedIndex];
+      loadSrc(opt.value, opt.dataset.fmt, opt.dataset.dl);
+    }});
+  </script>
+</body>
+</html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 app.debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"

@@ -268,8 +268,22 @@ async function handleRequest(request, apiKey) {
   const url  = new URL(request.url);
   const path = url.pathname;
 
-  if (path !== "/ph/proxy" && path !== "/proxy") {
-    // /ph/watch/<viewkey> — fetch qualities from Render API and serve the player page
+  // Routes that proxy back to Render API (with cold-start retry)
+  const RENDER_PROXY_PATHS = ["/xv/download", "/xnxx/download", "/xh/download"];
+  if (RENDER_PROXY_PATHS.includes(path) && request.method === "POST") {
+    return await proxyToRender(request, apiKey);
+  }
+
+  // Watch pages — redirect to Render (these serve full HTML from Python)
+  const RENDER_WATCH_PATHS = ["/xv/watch", "/xnxx/watch", "/xh/watch"];
+  if (RENDER_WATCH_PATHS.includes(path)) {
+    return Response.redirect(`${RENDER_BASE}${path}${url.search}`, 302);
+  }
+
+  const PROXY_PATHS = ["/ph/proxy", "/proxy", "/adult/proxy"];
+
+  if (!PROXY_PATHS.includes(path)) {
+    // /ph/watch/<viewkey> — serve player from Worker
     if (path.startsWith("/ph/watch/")) {
       const viewkeyWatch = path.replace("/ph/watch/", "").split("?")[0];
       if (viewkeyWatch) {
@@ -312,38 +326,36 @@ async function handleRequest(request, apiKey) {
     }
   }
 
-  const isPH    = path === "/ph/proxy";
+  const isPH      = path === "/ph/proxy";
+  const isTerabox = path === "/proxy";
+  const isAdult   = path === "/adult/proxy";
 
   // Terabox (/proxy): ndus cookie is IP-bound to Render's server IP.
   // CF Worker uses random edge IPs — Terabox rejects with errno 400141.
   // Always redirect Terabox requests to Render.
-  if (!isPH) {
+  if (isTerabox) {
     return Response.redirect(`${RENDER_BASE}${url.pathname}${url.search}`, 302);
   }
 
-  // Derive Referer/Origin from the actual CDN hostname so it works across
-  // all PH domains (pornhub.org, pornhubpremium.com, thumbzilla.com …)
-  // and all Terabox mirror domains (1024terabox.com, nephobox.com …)
+  // Derive correct Referer/Origin for CDN requests
   let referer, originH;
-  try {
-    const cdnHost = new URL(cdnUrl).origin; // e.g. https://ev.phncdn.com
-    if (isPH) {
-      // PH CDN (phncdn.com) requires Referer from a pornhub.* watch domain.
-      // Use pornhub.org if the URL came from there, otherwise default to .com
-      const vkSource = url.searchParams.get("src") || "";
-      const phDomain = vkSource.includes("pornhub.org") ? "pornhub.org" : "pornhub.com";
-      referer = `https://www.${phDomain}/`;
-      originH = `https://www.${phDomain}`;
+  if (isPH) {
+    referer = "https://www.pornhub.com/";
+    originH = "https://www.pornhub.com";
+  } else if (isAdult) {
+    // Auto-detect from CDN hostname
+    const cdnHost = (() => { try { return new URL(cdnUrl).hostname; } catch { return ""; } })();
+    if (/xnxx-cdn\.com/i.test(cdnHost)) {
+      referer = "https://www.xnxx.com/";
+      originH = "https://www.xnxx.com";
+    } else if (/xhmscdn|xhstorage|xhamster/i.test(cdnHost)) {
+      referer = "https://xhamster.com/";
+      originH = "https://xhamster.com";
     } else {
-      // Terabox CDN — canonical www.terabox.com Referer works across all
-      // mirror domains (1024terabox.com, nephobox.com, 4funbox.co, etc.)
-      // since they all share the same CDN auth infrastructure.
-      referer = "https://www.terabox.com/";
-      originH = "https://www.terabox.com";
+      // Default to Xvideos
+      referer = "https://www.xvideos.com/";
+      originH = "https://www.xvideos.com";
     }
-  } catch {
-    referer = isPH ? "https://www.pornhub.com/" : "https://www.terabox.com/";
-    originH = isPH ? "https://www.pornhub.com"  : "https://www.terabox.com";
   }
 
   const cdHeaders = new Headers({
@@ -359,6 +371,12 @@ async function handleRequest(request, apiKey) {
 
   if (isPH) {
     cdHeaders.set("Cookie", "accessAgeDisclaimerPH=1; accessAgeDisclaimerUK=1; accessPH=1; age_verified=1; platform=pc");
+  }
+  if (isAdult) {
+    const cdnHost = (() => { try { return new URL(cdnUrl).hostname; } catch { return ""; } })();
+    if (/xhmscdn|xhstorage|xhamster/i.test(cdnHost)) {
+      cdHeaders.set("Cookie", "adc_ga_v2=1; is_adult_confirmed=1; xhamster-language=en; platform=desktop");
+    }
   }
 
   const cdnResp = await fetch(cdnUrl, { method: "GET", headers: cdHeaders, redirect: "follow" });
