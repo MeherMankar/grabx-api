@@ -828,8 +828,17 @@ def _ph_get_all_qualities(ph_url: str):
     meta      = _ph_extract_metadata(html)
     hls_qs, get_media_url = _ph_parse_qualities(flashvars)
     mp4_qs    = _ph_resolve_get_media(get_media_url) if get_media_url else []
-    hls_only  = [q for q in hls_qs if q["format"] == "hls"]
-    all_qs    = mp4_qs + hls_only or hls_qs
+
+    # _ph_resolve_get_media can fail silently (IP block, timeout).
+    # Retry once if it returned nothing but we have a get_media URL.
+    if not mp4_qs and get_media_url:
+        mp4_qs = _ph_resolve_get_media(get_media_url)
+
+    hls_only = [q for q in hls_qs if q["format"] == "hls"]
+
+    # Prefer MP4 (direct, seekable) over HLS. Fall back to HLS if no MP4.
+    all_qs = mp4_qs + hls_only if (mp4_qs or hls_only) else hls_qs
+
     if not all_qs:
         raise ValueError(
             "No downloadable streams found. "
@@ -1357,33 +1366,66 @@ def ph_proxy():
         # HLS manifest rewriting
         # For .m3u8 playlists we rewrite every URI line so that each
         # segment / child playlist is fetched via this proxy (which adds
-        # the required Referer/cookie).  We resolve relative URIs against
-        # the manifest's own URL before re-encoding them.
+        # the required Referer/cookie).
         # ---------------------------------------------------------------
         if is_m3u8:
-            manifest_text = upstream.text
-            base_url = request.host_url.rstrip("/")
-            # The "base" for resolving relative URIs is the directory of the manifest URL
-            parsed_cdn   = urlparse(cdn_url)
-            cdn_base_dir = cdn_url[:cdn_url.rfind("/") + 1]  # everything up to last /
+            manifest_text = upstream.text.strip()
+
+            # Empty manifest means CDN rejected it (IP mismatch).
+            # Attempt auto-refresh using viewkey before giving up.
+            if not manifest_text or len(manifest_text) < 10:
+                vk_retry = request.args.get("vk", "")
+                q_retry  = request.args.get("q", "")
+                if vk_retry:
+                    try:
+                        _, fresh_qs = _ph_get_all_qualities(
+                            f"https://www.pornhub.com/view_video.php?viewkey={vk_retry}"
+                        )
+                        target = None
+                        if q_retry:
+                            target = next((x for x in fresh_qs
+                                           if str(x.get("quality")) == q_retry
+                                           and x.get("format") == "hls"), None)
+                        if not target:
+                            target = next((x for x in fresh_qs if x.get("format") == "hls"), None)
+                        if target:
+                            cdn_url = target["url"]
+                            upstream2 = session.get(
+                                cdn_url, headers=req_headers, allow_redirects=True,
+                                timeout=30, http_version=3, doh_url="https://1.1.1.1/dns-query",
+                                stream=True,
+                            )
+                            if upstream2.status_code in (200, 206):
+                                manifest_text = upstream2.text.strip()
+                    except Exception:
+                        pass
+
+            if not manifest_text or len(manifest_text) < 10:
+                return jsonify({
+                    "status": "error",
+                    "message": "CDN returned an empty HLS manifest. Link may have expired — re-fetch from /ph/download.",
+                }), 502
+
+            base_url_host = request.host_url.rstrip("/")
+            parsed_cdn_m  = urlparse(cdn_url)
+            cdn_base_dir_m = cdn_url[:cdn_url.rfind("/") + 1]
 
             rewritten_lines = []
             for line in manifest_text.splitlines():
                 stripped = line.strip()
-                # Skip blank lines and comment/tag lines that don't contain URIs
-                if not stripped or stripped.startswith("#"):
+                if not stripped:
+                    rewritten_lines.append(line)
+                    continue
+                if stripped.startswith("#"):
                     # Rewrite URI= attributes inside tags (e.g. #EXT-X-MEDIA:URI="...")
-                    def _rewrite_uri_attr(m):
-                        raw_uri = m.group(1)
-                        abs_uri = _resolve_hls_uri(raw_uri, cdn_base_dir, parsed_cdn)
-                        return f'URI="{_make_proxy_url(base_url, "/ph/proxy", abs_uri)}"'
-                    new_line = re.sub(r'URI="([^"]+)"', _rewrite_uri_attr, line)
-                    rewritten_lines.append(new_line)
+                    def _rewrite_attr(m, _base=cdn_base_dir_m, _parsed=parsed_cdn_m, _host=base_url_host):
+                        abs_uri = _resolve_hls_uri(m.group(1), _base, _parsed)
+                        return f'URI="{_make_proxy_url(_host, "/ph/proxy", abs_uri)}"'
+                    rewritten_lines.append(re.sub(r'URI="([^"]+)"', _rewrite_attr, line))
                 else:
-                    # It's a URI line (segment or child playlist)
-                    abs_uri   = _resolve_hls_uri(stripped, cdn_base_dir, parsed_cdn)
-                    proxy_uri = _make_proxy_url(base_url, "/ph/proxy", abs_uri)
-                    rewritten_lines.append(proxy_uri)
+                    # URI line — segment or child playlist
+                    abs_uri = _resolve_hls_uri(stripped, cdn_base_dir_m, parsed_cdn_m)
+                    rewritten_lines.append(_make_proxy_url(base_url_host, "/ph/proxy", abs_uri))
 
             rewritten_manifest = "\n".join(rewritten_lines) + "\n"
             return Response(
