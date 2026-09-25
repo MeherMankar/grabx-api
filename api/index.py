@@ -1262,8 +1262,9 @@ def ph_watch(viewkey: str):
             padding:8px 12px;font-size:.9rem;cursor:pointer;flex:1;min-width:120px}}
     select:focus{{outline:none;border-color:#f90}}
     .btn{{display:inline-flex;align-items:center;gap:6px;font-weight:700;font-size:.9rem;
-          padding:9px 18px;border-radius:6px;text-decoration:none;white-space:nowrap;transition:background .15s}}
+          padding:9px 18px;border-radius:6px;text-decoration:none;white-space:nowrap;transition:background .15s;cursor:pointer;border:none}}
     .btn-dl{{background:#f90;color:#000}}.btn-dl:hover{{background:#e88600}}
+    .btn-dl:disabled{{background:#666;cursor:not-allowed}}
     .meta{{margin-top:10px;font-size:.8rem;color:#666}}
     .note{{margin-top:16px;font-size:.75rem;color:#444;text-align:center}}
   </style>
@@ -1280,24 +1281,23 @@ def ph_watch(viewkey: str):
       <select id="qualitySelect" title="Select quality">
         {quality_options_html}
       </select>
-      <a id="dlBtn" class="btn btn-dl" href="{best_download}" download>&#8595; Download</a>
+      <button id="dlBtn" class="btn btn-dl">&#8595; Download</button>
     </div>
-    <div class="meta">{'Duration: ' + duration + ' &nbsp;·&nbsp; ' if duration else ''}Powered by PH Downloader API</div>
+    <div class="meta">{'Duration: ' + duration + ' &nbsp;·&nbsp; ' if duration else ''}Powered by <a href="https://github.com/MeherMankar/grabx-api" target="_blank" style="color:#f90;text-decoration:none">GrabX API</a></div>
     <p class="note">Tip: right-click the video → "Save video as" to download directly from CDN.</p>
   </div>
-  <!-- HLS.js for browsers that don't support HLS natively -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <script>
     const video = document.getElementById('player');
     const sel   = document.getElementById('qualitySelect');
-    const dl    = document.getElementById('dlBtn');
+    const dlBtn = document.getElementById('dlBtn');
     let hls     = null;
+    let currentDlUrl = '{best_download}';
 
     function loadSrc(streamUrl, fmt, dlUrl) {{
       const isHls = fmt === 'hls' || streamUrl.includes('.m3u8');
-
+      currentDlUrl = dlUrl;
       if (hls) {{ hls.destroy(); hls = null; }}
-
       if (isHls) {{
         if (Hls.isSupported()) {{
           hls = new Hls({{ enableWorker: true, lowLatencyMode: false }});
@@ -1305,19 +1305,42 @@ def ph_watch(viewkey: str):
           hls.attachMedia(video);
           hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {{}}));
         }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
-          // Safari native HLS
           video.src = streamUrl;
           video.play().catch(() => {{}});
-        }} else {{
-          video.innerHTML = '<p style="color:#f55;padding:20px">HLS not supported in this browser.</p>';
         }}
       }} else {{
         video.src = streamUrl;
         video.load();
       }}
-
-      dl.href = dlUrl;
     }}
+
+    // Download: fetch as blob to bypass cross-origin download attribute restriction
+    dlBtn.addEventListener('click', async function() {{
+      dlBtn.textContent = 'Preparing...';
+      dlBtn.disabled = true;
+      try {{
+        const resp = await fetch(currentDlUrl);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const blob = await resp.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        // Try to get filename from Content-Disposition or use fallback
+        const cd = resp.headers.get('Content-Disposition') || '';
+        const match = cd.match(/filename[*]?=["']?([^"';\\n]+)/i);
+        a.download = match ? match[1].trim() : 'video.mp4';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+      }} catch (e) {{
+        // Fallback: open in new tab
+        window.open(currentDlUrl, '_blank');
+      }} finally {{
+        dlBtn.textContent = '↓ Download';
+        dlBtn.disabled = false;
+      }}
+    }});
 
     // Load initial stream
     const firstOpt = sel.options[sel.selectedIndex];
