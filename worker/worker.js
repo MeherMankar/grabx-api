@@ -314,10 +314,65 @@ async function handleRequest(request, apiKey) {
 
   const isPH    = path === "/ph/proxy";
 
-  // Terabox (/proxy) requires ndus cookie which only Render has.
-  // Redirect those requests to Render instead of trying to proxy without auth.
+  // Terabox (/proxy) needs the ndus cookie.
+  // Render embeds the ndus value in the signed proxy URL at link-generation time.
+  // The Worker reads it here and uses it to authenticate with Terabox CDN.
+  // Fallback: if ndus not in URL, check Worker secret, then fall back to Render.
   if (!isPH) {
-    return Response.redirect(`${RENDER_BASE}${url.pathname}${url.search}`, 302);
+    // ndus from URL params (embedded by Render) or Worker secret
+    const ndusFromUrl    = url.searchParams.get("ndus") || "";
+    const ndusFromSecret = (globalThis.TERABOX_COOKIE || "").trim();
+    let ndus = ndusFromUrl;
+    if (!ndus && ndusFromSecret) {
+      const list = ndusFromSecret.split(",").map(e => {
+        e = e.trim();
+        return e.toLowerCase().startsWith("ndus=") ? e.slice(5) : e;
+      }).filter(Boolean);
+      ndus = list[Math.floor(Math.random() * list.length)] || "";
+    }
+    if (!ndus) {
+      // No cookie available — redirect to Render which has it
+      return Response.redirect(`${RENDER_BASE}${url.pathname}${url.search}`, 302);
+    }
+
+    const teraHeaders = new Headers({
+      "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Referer":         "https://www.terabox.com/",
+      "Origin":          "https://www.terabox.com",
+      "Cookie":          `ndus=${ndus}`,
+      "Accept":          "*/*",
+      "Accept-Encoding": "identity",
+    });
+    const rangeHdr = request.headers.get("Range");
+    if (rangeHdr) teraHeaders.set("Range", rangeHdr);
+
+    const teraResp = await fetch(cdnUrl, { method: "GET", headers: teraHeaders, redirect: "follow" });
+
+    if (!teraResp.ok) {
+      return new Response(
+        JSON.stringify({ status: "error", message: `Terabox CDN returned HTTP ${teraResp.status}.` }),
+        { status: teraResp.status, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    const pathPart = new URL(cdnUrl).pathname;
+    const fname    = pathPart.split("/").pop().split("?")[0] || "download";
+    const safeF    = fname.includes(".") ? fname : fname + ".bin";
+    const disp     = downloadMode ? `attachment; filename="${safeF}"` : `inline; filename="${safeF}"`;
+
+    const respHdrs = new Headers({
+      "Content-Type":                teraResp.headers.get("Content-Type") || "application/octet-stream",
+      "Content-Disposition":         disp,
+      "Accept-Ranges":               "bytes",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control":               "no-store",
+    });
+    for (const h of ["Content-Length", "Content-Range", "ETag"]) {
+      const v = teraResp.headers.get(h);
+      if (v) respHdrs.set(h, v);
+    }
+
+    return new Response(teraResp.body, { status: teraResp.status, headers: respHdrs });
   }
 
   // Derive Referer/Origin from the actual CDN hostname so it works across
@@ -419,6 +474,7 @@ export default {
   async fetch(request, env, ctx) {
     try {
       const apiKey = (env && env.API_KEY) ? String(env.API_KEY) : "";
+      globalThis.TERABOX_COOKIE = (env && env.TERABOX_COOKIE) ? String(env.TERABOX_COOKIE) : "";
       const url    = new URL(request.url);
 
       // CORS preflight
