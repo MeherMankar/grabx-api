@@ -191,25 +191,28 @@ def _make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
     """
     Build a full proxy URL with an embedded signed token.
 
-    CF Worker handles PH (/ph/proxy) and Terabox (/proxy).
-    For Terabox, the ndus cookie is embedded in the URL (signed/protected by
-    the HMAC token) so the Worker can authenticate with Terabox CDN without
-    needing a separate secret — Render passes it through at link-generation time.
+    PH streams (/ph/proxy) go through CF Worker — PH CDN is IP-bound to
+    Render's outbound IP when the link is generated, so we need the Worker
+    to re-fetch from the same IP. CF Worker calls Render's /ph/download.
+
+    Terabox streams (/proxy) ALWAYS go through Render — the ndus cookie is
+    IP-bound to Render's server IP. CF Worker IPs are random edge nodes that
+    Terabox rejects with errno 400141.
     """
-    if _CF_WORKER_URL and path in ("/ph/proxy", "/proxy"):
+    if _CF_WORKER_URL and path == "/ph/proxy":
         proxy_base = _CF_WORKER_URL
     else:
+        # Terabox always via Render (ndus cookie is IP-locked to Render)
         proxy_base = base_url
 
     enc      = quote(cdn_url, safe="")
     token    = _sign_url(cdn_url)
-    vk_part   = f"&vk={quote(viewkey)}"     if viewkey    else ""
-    q_part    = f"&q={quote(quality)}"      if quality    else ""
-    src_part  = f"&src={quote(src_domain)}" if src_domain else ""
-    ndus_part = f"&ndus={quote(ndus)}"      if ndus       else ""
+    vk_part  = f"&vk={quote(viewkey)}"     if viewkey    else ""
+    q_part   = f"&q={quote(quality)}"      if quality    else ""
+    src_part = f"&src={quote(src_domain)}" if src_domain else ""
     if token:
-        return f"{proxy_base}{path}?url={enc}&{token}{vk_part}{q_part}{src_part}{ndus_part}{extra}"
-    return f"{proxy_base}{path}?url={enc}{vk_part}{q_part}{src_part}{ndus_part}{extra}"
+        return f"{proxy_base}{path}?url={enc}&{token}{vk_part}{q_part}{src_part}{extra}"
+    return f"{proxy_base}{path}?url={enc}{vk_part}{q_part}{src_part}{extra}"
 
 
 def _check_raw_key() -> bool:
@@ -993,7 +996,7 @@ def download():
             thumbnail  = (thumbs.get("url3") or thumbs.get("url2") or
                           thumbs.get("url1") or thumbs.get("icon") or "")
             size_bytes = int(item.get("size", 0))
-            proxy_url  = _make_proxy_url(base_url, "/proxy", dlink, ndus=ndus) if dlink else ""
+            proxy_url  = _make_proxy_url(base_url, "/proxy", dlink) if dlink else ""
 
             # Folder path the file lives in (relative to share root)
             folder_path = item.get("path", "")
