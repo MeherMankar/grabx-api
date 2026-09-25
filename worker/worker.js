@@ -80,6 +80,10 @@ async function handleRequest(request, apiKey) {
   const path = url.pathname;
 
   if (path !== "/ph/proxy" && path !== "/proxy") {
+    // Pass /ph/watch/* back to Render (watch page lives there, not on the Worker)
+    if (path.startsWith("/ph/watch/")) {
+      return Response.redirect(`${RENDER_BASE}${path}${url.search}`, 302);
+    }
     return new Response(JSON.stringify({ status: "error", message: "Not found" }),
       { status: 404, headers: { "Content-Type": "application/json" } });
   }
@@ -108,11 +112,11 @@ async function handleRequest(request, apiKey) {
   const isM3u8 = cdnUrl.includes(".m3u8");
   const isTs   = cdnUrl.endsWith(".ts") || cdnUrl.includes(".ts?");
 
-  // Browser opening m3u8 → redirect to watch page
+  // Browser opening m3u8 → redirect to watch page on Render
   if (isM3u8 && viewkey && path === "/ph/proxy") {
     const accept = request.headers.get("Accept") || "";
     if (accept.includes("text/html") && !accept.includes("application/x-mpegurl")) {
-      return Response.redirect(`${url.origin}/ph/watch/${viewkey}`, 302);
+      return Response.redirect(`${RENDER_BASE}/ph/watch/${viewkey}`, 302);
     }
   }
 
@@ -187,6 +191,8 @@ async function handleRequest(request, apiKey) {
 // ---------------------------------------------------------------------------
 // Entry point — everything inside try/catch
 // ---------------------------------------------------------------------------
+
+const RENDER_BASE = "https://grabx-api.onrender.com";
 
 export default {
   async fetch(request, env, ctx) {
