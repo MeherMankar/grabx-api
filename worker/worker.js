@@ -465,6 +465,65 @@ async function handleRequest(request, apiKey) {
 }
 
 // ---------------------------------------------------------------------------
+// proxyToRender — forward a request to Render, retrying through cold start
+// ---------------------------------------------------------------------------
+
+async function proxyToRender(request, apiKey) {
+  const url     = new URL(request.url);
+  const body    = await request.text();
+  const headers = {
+    "Content-Type": "application/json",
+  };
+  if (apiKey) headers["X-API-Key"] = apiKey;
+
+  // Ping Render first to trigger wake-up, then retry the actual request.
+  // CF Workers can wait up to 30s per subrequest — enough for a cold start.
+  const MAX_ATTEMPTS = 3;
+  const RETRY_DELAY  = 5000; // ms between retries
+
+  let lastResp;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      const resp = await fetch(`${RENDER_BASE}${url.pathname}${url.search}`, {
+        method:  request.method,
+        headers: headers,
+        body:    body || undefined,
+      });
+
+      // Success or a real error (not a timeout/network error)
+      if (resp.ok || (resp.status >= 400 && resp.status < 500)) {
+        const data = await resp.json().catch(() => ({}));
+        return new Response(JSON.stringify(data), {
+          status:  resp.status,
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        });
+      }
+
+      lastResp = resp;
+    } catch (err) {
+      // Network error (Render cold start / connection refused) — wait and retry
+      if (attempt < MAX_ATTEMPTS - 1) {
+        await new Promise(r => setTimeout(r, RETRY_DELAY));
+        continue;
+      }
+      return new Response(
+        JSON.stringify({ status: "error", message: `Render unreachable after ${MAX_ATTEMPTS} attempts: ${err.message}` }),
+        { status: 502, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    if (attempt < MAX_ATTEMPTS - 1) {
+      await new Promise(r => setTimeout(r, RETRY_DELAY));
+    }
+  }
+
+  return new Response(
+    JSON.stringify({ status: "error", message: `Render returned HTTP ${lastResp?.status}` }),
+    { status: lastResp?.status || 502, headers: { "Content-Type": "application/json" } },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Entry point — everything inside try/catch
 // ---------------------------------------------------------------------------
 
@@ -496,6 +555,15 @@ export default {
           service: "grabx-proxy worker",
           auth:    apiKey ? "enabled" : "disabled (API_KEY not set)",
         }), { headers: { "Content-Type": "application/json" } });
+      }
+
+      // ---------------------------------------------------------------------------
+      // Terabox /download — proxy through to Render with wake-up retry.
+      // The Worker has no timeout so it can absorb Render's 30s cold start.
+      // The bot hits the Worker URL instead of Render directly.
+      // ---------------------------------------------------------------------------
+      if (url.pathname === "/download" && request.method === "POST") {
+        return await proxyToRender(request, apiKey);
       }
 
       if (request.method !== "GET" && request.method !== "HEAD") {
