@@ -186,7 +186,7 @@ def _verify_proxy_token(cdn_url: str) -> bool:
 
 
 def _make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
-                    viewkey: str = "", quality: str = "") -> str:
+                    viewkey: str = "", quality: str = "", src_domain: str = "") -> str:
     """
     Build a full proxy URL with an embedded signed token.
 
@@ -194,21 +194,22 @@ def _make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
     so all streaming/download bandwidth bypasses Render entirely.
     Otherwise falls back to this Render instance.
 
-    path     — '/proxy' or '/ph/proxy'
-    extra    — extra query params e.g. '&dl=1'
-    viewkey  — PH viewkey for auto-refresh on expired CDN links
-    quality  — quality label e.g. '1080'
+    path        — '/proxy' or '/ph/proxy'
+    extra       — extra query params e.g. '&dl=1'
+    viewkey     — PH viewkey for auto-refresh on expired CDN links
+    quality     — quality label e.g. '1080'
+    src_domain  — source PH domain (e.g. 'pornhub.org') so Worker uses correct Referer
     """
-    # Use CF Worker base if configured, otherwise use the Render base passed in
     proxy_base = _CF_WORKER_URL if _CF_WORKER_URL else base_url
 
     enc   = quote(cdn_url, safe="")
     token = _sign_url(cdn_url)
-    vk_part = f"&vk={quote(viewkey)}" if viewkey else ""
-    q_part  = f"&q={quote(quality)}"  if quality  else ""
+    vk_part  = f"&vk={quote(viewkey)}"     if viewkey    else ""
+    q_part   = f"&q={quote(quality)}"      if quality    else ""
+    src_part = f"&src={quote(src_domain)}" if src_domain else ""
     if token:
-        return f"{proxy_base}{path}?url={enc}&{token}{vk_part}{q_part}{extra}"
-    return f"{proxy_base}{path}?url={enc}{vk_part}{q_part}{extra}"
+        return f"{proxy_base}{path}?url={enc}&{token}{vk_part}{q_part}{src_part}{extra}"
+    return f"{proxy_base}{path}?url={enc}{vk_part}{q_part}{src_part}{extra}"
 
 
 def _check_raw_key() -> bool:

@@ -121,8 +121,31 @@ async function handleRequest(request, apiKey) {
   }
 
   const isPH    = path === "/ph/proxy";
-  const referer = isPH ? "https://www.pornhub.com/" : "https://www.terabox.com/";
-  const originH = isPH ? "https://www.pornhub.com"  : "https://www.terabox.com";
+
+  // Derive Referer/Origin from the actual CDN hostname so it works across
+  // all PH domains (pornhub.org, pornhubpremium.com, thumbzilla.com …)
+  // and all Terabox mirror domains (1024terabox.com, nephobox.com …)
+  let referer, originH;
+  try {
+    const cdnHost = new URL(cdnUrl).origin; // e.g. https://ev.phncdn.com
+    if (isPH) {
+      // PH CDN (phncdn.com) requires Referer from a pornhub.* watch domain.
+      // Use pornhub.org if the URL came from there, otherwise default to .com
+      const vkSource = url.searchParams.get("src") || "";
+      const phDomain = vkSource.includes("pornhub.org") ? "pornhub.org" : "pornhub.com";
+      referer = `https://www.${phDomain}/`;
+      originH = `https://www.${phDomain}`;
+    } else {
+      // Terabox CDN — canonical www.terabox.com Referer works across all
+      // mirror domains (1024terabox.com, nephobox.com, 4funbox.co, etc.)
+      // since they all share the same CDN auth infrastructure.
+      referer = "https://www.terabox.com/";
+      originH = "https://www.terabox.com";
+    }
+  } catch {
+    referer = isPH ? "https://www.pornhub.com/" : "https://www.terabox.com/";
+    originH = isPH ? "https://www.pornhub.com"  : "https://www.terabox.com";
+  }
 
   const cdHeaders = new Headers({
     "Referer":        referer,
