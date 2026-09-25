@@ -314,6 +314,12 @@ async function handleRequest(request, apiKey) {
 
   const isPH    = path === "/ph/proxy";
 
+  // Terabox (/proxy) requires ndus cookie which only Render has.
+  // Redirect those requests to Render instead of trying to proxy without auth.
+  if (!isPH) {
+    return Response.redirect(`${RENDER_BASE}${url.pathname}${url.search}`, 302);
+  }
+
   // Derive Referer/Origin from the actual CDN hostname so it works across
   // all PH domains (pornhub.org, pornhubpremium.com, thumbzilla.com …)
   // and all Terabox mirror domains (1024terabox.com, nephobox.com …)

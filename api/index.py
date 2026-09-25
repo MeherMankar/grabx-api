@@ -190,20 +190,18 @@ def _make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
     """
     Build a full proxy URL with an embedded signed token.
 
-    If CF_WORKER_URL is configured the URL points to the Cloudflare Worker
-    so all streaming/download bandwidth bypasses Render entirely.
-    Otherwise falls back to this Render instance.
-
-    path        — '/proxy' or '/ph/proxy'
-    extra       — extra query params e.g. '&dl=1'
-    viewkey     — PH viewkey for auto-refresh on expired CDN links
-    quality     — quality label e.g. '1080'
-    src_domain  — source PH domain (e.g. 'pornhub.org') so Worker uses correct Referer
+    CF Worker handles PH streams (/ph/proxy) only.
+    Terabox streams (/proxy) always go through Render — the Worker doesn't
+    have the ndus cookie needed to authenticate Terabox CDN requests.
     """
-    proxy_base = _CF_WORKER_URL if _CF_WORKER_URL else base_url
+    # Only route PH proxy through CF Worker — Terabox needs ndus cookie on Render
+    if _CF_WORKER_URL and path == "/ph/proxy":
+        proxy_base = _CF_WORKER_URL
+    else:
+        proxy_base = base_url
 
-    enc   = quote(cdn_url, safe="")
-    token = _sign_url(cdn_url)
+    enc      = quote(cdn_url, safe="")
+    token    = _sign_url(cdn_url)
     vk_part  = f"&vk={quote(viewkey)}"     if viewkey    else ""
     q_part   = f"&q={quote(quality)}"      if quality    else ""
     src_part = f"&src={quote(src_domain)}" if src_domain else ""
