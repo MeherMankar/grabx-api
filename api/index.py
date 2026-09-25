@@ -1237,9 +1237,11 @@ def ph_watch(viewkey: str):
     duration      = meta.get("duration", "")
 
     quality_options_html = "\n".join(
-        f'<option value="{o["proxy"]}" data-dl="{o["download"]}">{o["label"]}</option>'
+        f'<option value="{o["proxy"]}" data-fmt="{o["fmt"]}" data-dl="{o["download"]}">{o["label"]}</option>'
         for o in sorted_opts
     )
+
+    best_is_hls   = sorted_opts[0]["fmt"] == "hls"
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1271,7 +1273,6 @@ def ph_watch(viewkey: str):
     <h1>{title}</h1>
     <div class="player-wrap">
       <video id="player" controls preload="metadata" poster="{thumbnail}">
-        <source id="src" src="{best_stream}" type="video/mp4"/>
         Your browser does not support HTML5 video.
       </video>
     </div>
@@ -1284,17 +1285,47 @@ def ph_watch(viewkey: str):
     <div class="meta">{'Duration: ' + duration + ' &nbsp;·&nbsp; ' if duration else ''}Powered by PH Downloader API</div>
     <p class="note">Tip: right-click the video → "Save video as" to download directly from CDN.</p>
   </div>
+  <!-- HLS.js for browsers that don't support HLS natively -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <script>
-    const video=document.getElementById('player');
-    const src=document.getElementById('src');
-    const sel=document.getElementById('qualitySelect');
-    const dl=document.getElementById('dlBtn');
-    sel.addEventListener('change',function(){{
-      const opt=this.options[this.selectedIndex];
-      const t=video.currentTime, playing=!video.paused;
-      src.src=opt.value; video.load(); video.currentTime=t;
-      dl.href=opt.dataset.dl;
-      if(playing) video.play();
+    const video = document.getElementById('player');
+    const sel   = document.getElementById('qualitySelect');
+    const dl    = document.getElementById('dlBtn');
+    let hls     = null;
+
+    function loadSrc(streamUrl, fmt, dlUrl) {{
+      const isHls = fmt === 'hls' || streamUrl.includes('.m3u8');
+
+      if (hls) {{ hls.destroy(); hls = null; }}
+
+      if (isHls) {{
+        if (Hls.isSupported()) {{
+          hls = new Hls({{ enableWorker: true, lowLatencyMode: false }});
+          hls.loadSource(streamUrl);
+          hls.attachMedia(video);
+          hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {{}}));
+        }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
+          // Safari native HLS
+          video.src = streamUrl;
+          video.play().catch(() => {{}});
+        }} else {{
+          video.innerHTML = '<p style="color:#f55;padding:20px">HLS not supported in this browser.</p>';
+        }}
+      }} else {{
+        video.src = streamUrl;
+        video.load();
+      }}
+
+      dl.href = dlUrl;
+    }}
+
+    // Load initial stream
+    const firstOpt = sel.options[sel.selectedIndex];
+    loadSrc(firstOpt.value, firstOpt.dataset.fmt, firstOpt.dataset.dl);
+
+    sel.addEventListener('change', function() {{
+      const opt = this.options[this.selectedIndex];
+      loadSrc(opt.value, opt.dataset.fmt, opt.dataset.dl);
     }});
   </script>
 </body>
