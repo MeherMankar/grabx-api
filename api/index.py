@@ -66,6 +66,18 @@ _API_KEY = (
     or os.environ.get("GRABX_API_KEY", "").strip()
 )
 
+# ---------------------------------------------------------------------------
+# Cloudflare Worker proxy base URL.
+# When set, ALL proxy_url / download_url fields in API responses point to the
+# Worker instead of this Render instance.  Render then has zero streaming load.
+#
+# Set CF_WORKER_URL on Render to your deployed Worker URL, e.g.:
+#   https://grabx-proxy.yourname.workers.dev
+#
+# Leave unset to fall back to Render-side streaming (the old behaviour).
+# ---------------------------------------------------------------------------
+_CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "").rstrip("/")
+
 # Routes that are always public regardless of API_KEY setting.
 _PUBLIC_ROUTES = {"/", "/docs", "/health", "/debug/headers"}
 
@@ -177,18 +189,26 @@ def _make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
                     viewkey: str = "", quality: str = "") -> str:
     """
     Build a full proxy URL with an embedded signed token.
-    path     — e.g. '/proxy' or '/ph/proxy'
-    extra    — any extra query params like '&dl=1'
-    viewkey  — PH viewkey; embedded so the proxy can auto-refresh expired CDN links
-    quality  — quality label (e.g. '1080') for targeted refresh
+
+    If CF_WORKER_URL is configured the URL points to the Cloudflare Worker
+    so all streaming/download bandwidth bypasses Render entirely.
+    Otherwise falls back to this Render instance.
+
+    path     — '/proxy' or '/ph/proxy'
+    extra    — extra query params e.g. '&dl=1'
+    viewkey  — PH viewkey for auto-refresh on expired CDN links
+    quality  — quality label e.g. '1080'
     """
+    # Use CF Worker base if configured, otherwise use the Render base passed in
+    proxy_base = _CF_WORKER_URL if _CF_WORKER_URL else base_url
+
     enc   = quote(cdn_url, safe="")
     token = _sign_url(cdn_url)
     vk_part = f"&vk={quote(viewkey)}" if viewkey else ""
     q_part  = f"&q={quote(quality)}"  if quality  else ""
     if token:
-        return f"{base_url}{path}?url={enc}&{token}{vk_part}{q_part}{extra}"
-    return f"{base_url}{path}?url={enc}{vk_part}{q_part}{extra}"
+        return f"{proxy_base}{path}?url={enc}&{token}{vk_part}{q_part}{extra}"
+    return f"{proxy_base}{path}?url={enc}{vk_part}{q_part}{extra}"
 
 
 def _check_raw_key() -> bool:
@@ -859,6 +879,7 @@ def home():
         "creator": "Maintained by MeherMankar (t.me/MeherPatil) | Base by genxnano (t.me/genxnano)",
         "accounts_configured": get_account_count(),
         "auth": "enabled (X-API-Key required)" if _API_KEY else "disabled (open access)",
+        "proxy_backend": _CF_WORKER_URL if _CF_WORKER_URL else "render (this server)",
         "endpoints": {
             "/download": {
                 "method": "POST",
@@ -913,6 +934,7 @@ def health():
         "platform": platform.platform(),
         "accounts_configured": get_account_count(),
         "auth": "enabled" if _API_KEY else "disabled",
+        "proxy_backend": _CF_WORKER_URL if _CF_WORKER_URL else "render (this server)",
     })
 
 
@@ -1130,9 +1152,20 @@ def ph_download():
         best           = mp4s[0] if mp4s else all_qualities[0]
         best_url      = best["url"]
         best_ql       = str(best.get("quality", ""))
+        best_fmt      = best.get("format", "mp4")
         best_proxy    = _make_proxy_url(base_url, "/ph/proxy", best_url, viewkey=vk, quality=best_ql)
         best_download = _make_proxy_url(base_url, "/ph/proxy", best_url, extra="&dl=1", viewkey=vk, quality=best_ql)
         watch_url     = f"{base_url}/ph/watch/{meta['viewkey']}" if meta.get("viewkey") else ""
+
+        # When only HLS is available the raw proxy URL opens as a manifest file
+        # in browsers — steer users to the watch page instead.
+        stream_note = (
+            "Open 'watch_url' in a browser for the built-in video player. "
+            + ("Use 'best_proxy_url' to stream (MP4) or 'best_download_url' to download. "
+               if best_fmt == "mp4"
+               else "MP4 streams unavailable — use 'watch_url' for browser playback (HLS via built-in player). ")
+            + "Or pick any quality from 'qualities' and use its proxy_url / download_url."
+        )
 
         return jsonify({
             "status": "success",
@@ -1143,15 +1176,12 @@ def ph_download():
                 "duration_seconds":  meta["duration_seconds"],
                 "viewkey":           meta["viewkey"],
                 "watch_url":         watch_url,
+                "best_format":       best_fmt,
                 "qualities":         all_qualities,
                 "best_url":          best_url,
                 "best_proxy_url":    best_proxy,
                 "best_download_url": best_download,
-                "note": (
-                    "Open 'watch_url' in a browser for the built-in video player. "
-                    "Use 'best_proxy_url' to stream or 'best_download_url' to download. "
-                    "Or pick any quality from 'qualities' and use its proxy_url / download_url."
-                ),
+                "note":              stream_note,
             },
         })
     except ValueError as e:
@@ -1178,28 +1208,36 @@ def ph_watch(viewkey: str):
 
     base_url = request.host_url.rstrip("/")
 
-    mp4_opts = []
+    all_opts = []
     for q in all_qualities:
-        if q["format"] == "mp4":
-            ql = str(q.get("quality", ""))
-            mp4_opts.append({
-                "label":    f"{ql}p",
-                "proxy":    _make_proxy_url(base_url, "/ph/proxy", q["url"], viewkey=viewkey, quality=ql),
-                "download": _make_proxy_url(base_url, "/ph/proxy", q["url"], extra="&dl=1", viewkey=viewkey, quality=ql),
-            })
+        ql  = str(q.get("quality", ""))
+        fmt = q.get("format", "mp4")
+        # Label: prefer "1080p MP4", fall back to "1080p HLS"
+        label = f"{ql}p {fmt.upper()}" if ql else fmt.upper()
+        all_opts.append({
+            "label":    label,
+            "fmt":      fmt,
+            "proxy":    _make_proxy_url(base_url, "/ph/proxy", q["url"], viewkey=viewkey, quality=ql),
+            "download": _make_proxy_url(base_url, "/ph/proxy", q["url"], extra="&dl=1", viewkey=viewkey, quality=ql),
+        })
 
-    if not mp4_opts:
-        return "<h2>No MP4 streams found for this video.</h2>", 404
+    # Prefer MP4 at top; HLS options still included as fallback
+    mp4_opts = [o for o in all_opts if o["fmt"] == "mp4"]
+    hls_opts = [o for o in all_opts if o["fmt"] == "hls"]
+    sorted_opts = mp4_opts + hls_opts  # MP4 first, HLS below
 
-    best_stream   = mp4_opts[0]["proxy"]
-    best_download = mp4_opts[0]["download"]
+    if not sorted_opts:
+        return "<h2>No streams found for this video.</h2>", 404
+
+    best_stream   = sorted_opts[0]["proxy"]
+    best_download = sorted_opts[0]["download"]
     title         = meta["title"]
     thumbnail     = meta.get("thumbnail", "")
     duration      = meta.get("duration", "")
 
     quality_options_html = "\n".join(
-        f'<option value="{o["proxy"]}" data-dl="{o["download"]}">{o["label"]} MP4</option>'
-        for o in mp4_opts
+        f'<option value="{o["proxy"]}" data-dl="{o["download"]}">{o["label"]}</option>'
+        for o in sorted_opts
     )
 
     page = f"""<!DOCTYPE html>
