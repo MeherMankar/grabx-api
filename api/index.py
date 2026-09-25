@@ -772,16 +772,26 @@ def _ph_resolve_get_media(get_media_url: str) -> list:
         session = _cffi_session()
         r = session.get(
             get_media_url,
-            headers={"Referer": "https://www.pornhub.com/"},
+            headers={
+                "Referer":          "https://www.pornhub.com/",
+                "Origin":           "https://www.pornhub.com",
+                "Accept":           "application/json, text/plain, */*",
+                "Accept-Language":  "en-US,en;q=0.9",
+                "X-Requested-With": "XMLHttpRequest",
+            },
             allow_redirects=True,
             timeout=15,
             http_version=3,
             doh_url="https://1.1.1.1/dns-query",
         )
         if r.status_code != 200:
+            import sys
+            print(f"[get_media] HTTP {r.status_code}: {r.text[:200]}", file=sys.stderr)
             return []
         items = r.json()
         if not isinstance(items, list):
+            import sys
+            print(f"[get_media] unexpected response type: {type(items)} — {str(items)[:200]}", file=sys.stderr)
             return []
         entries = []
         for item in items:
@@ -793,7 +803,9 @@ def _ph_resolve_get_media(get_media_url: str) -> list:
             entries.append({"quality": quality, "url": video_url, "format": fmt})
         entries.sort(key=lambda e: -int(e["quality"]) if e["quality"].isdigit() else 0)
         return entries
-    except Exception:
+    except Exception as e:
+        import sys
+        print(f"[get_media] exception: {e}", file=sys.stderr)
         return []
 
 
@@ -856,7 +868,13 @@ def _ph_get_all_qualities(ph_url: str):
     # _ph_resolve_get_media can fail silently (IP block, timeout).
     # Retry once if it returned nothing but we have a get_media URL.
     if not mp4_qs and get_media_url:
+        import sys
+        print(f"[ph_qualities] first get_media attempt returned empty, retrying. url={get_media_url[:80]}", file=sys.stderr)
         mp4_qs = _ph_resolve_get_media(get_media_url)
+        print(f"[ph_qualities] retry result: {len(mp4_qs)} MP4 entries", file=sys.stderr)
+    else:
+        import sys
+        print(f"[ph_qualities] got {len(mp4_qs)} MP4 entries, {len([q for q in hls_qs if q['format']=='hls'])} HLS entries", file=sys.stderr)
 
     hls_only = [q for q in hls_qs if q["format"] == "hls"]
 

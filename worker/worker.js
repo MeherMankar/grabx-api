@@ -504,11 +504,10 @@ export default {
       }
 
       // ---------------------------------------------------------------------------
-      // Terabox /download — proxy through to Render with wake-up retry.
-      // The Worker has no timeout so it can absorb Render's 30s cold start.
-      // The bot hits the Worker URL instead of Render directly.
+      // Terabox /download and PH /ph/download — proxy through to Render with
+      // wake-up retry. Worker has no timeout so it absorbs Render's 30s cold start.
       // ---------------------------------------------------------------------------
-      if (url.pathname === "/download" && request.method === "POST") {
+      if ((url.pathname === "/download" || url.pathname === "/ph/download") && request.method === "POST") {
         return await proxyToRender(request, apiKey);
       }
 
