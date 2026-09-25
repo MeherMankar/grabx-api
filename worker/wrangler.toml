@@ -1,39 +1,7 @@
 name = "grabx-api"
 main = "worker.js"
-compatibility_date = "2024-05-01"
-compatibility_flags = ["nodejs_compat"]
-# last updated: 2026-09-25
-
-# ---------------------------------------------------------------------------
-# Routes — the Worker will handle /ph/proxy and /proxy on your CF zone.
-# Replace "grabx.your-domain.com" with your actual CF-proxied domain, OR
-# leave the workers.dev route enabled and use the auto-assigned subdomain.
-# ---------------------------------------------------------------------------
-
-# Option A — workers.dev subdomain (no custom domain needed, works out of the box)
+compatibility_date = "2024-09-25"
 workers_dev = true
-
-# Option B — custom domain on Cloudflare (uncomment + fill in your zone)
-# [[routes]]
-# pattern = "grabx.yourdomain.com/ph/proxy*"
-# zone_name = "yourdomain.com"
-#
-# [[routes]]
-# pattern = "grabx.yourdomain.com/proxy*"
-# zone_name = "yourdomain.com"
-
-# ---------------------------------------------------------------------------
-# Secrets — set these via CLI, NOT hardcoded here:
-#   npx wrangler secret put API_KEY
-# Then paste your key (same value as GRABX_API_KEY on Render).
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Local dev binding (wrangler dev only) — mirrors the secret
-# ---------------------------------------------------------------------------
-[vars]
-# Leave empty; use `wrangler secret put API_KEY` for production.
-# For local dev: wrangler dev --var API_KEY:yourkey
 
 [observability]
 enabled = true
