@@ -1293,10 +1293,12 @@ def ph_watch(viewkey: str):
     const dlBtn = document.getElementById('dlBtn');
     let hls     = null;
     let currentDlUrl = '{best_download}';
+    let currentFmt   = '{sorted_opts[0]["fmt"]}';
 
     function loadSrc(streamUrl, fmt, dlUrl) {{
       const isHls = fmt === 'hls' || streamUrl.includes('.m3u8');
       currentDlUrl = dlUrl;
+      currentFmt   = fmt;
       if (hls) {{ hls.destroy(); hls = null; }}
       if (isHls) {{
         if (Hls.isSupported()) {{
@@ -1314,8 +1316,16 @@ def ph_watch(viewkey: str):
       }}
     }}
 
-    // Download: fetch as blob to bypass cross-origin download attribute restriction
+    // Download: for HLS use the download_url which streams server-side as attachment.
+    // For MP4 fetch as blob.
     dlBtn.addEventListener('click', async function() {{
+      const isHls = currentFmt === 'hls';
+      if (isHls) {{
+        // HLS can't be downloaded as a single file from the browser.
+        // Open the &dl=1 proxy URL in a new tab — server will stream it as attachment.
+        window.open(currentDlUrl, '_blank');
+        return;
+      }}
       dlBtn.textContent = 'Preparing...';
       dlBtn.disabled = true;
       try {{
@@ -1325,7 +1335,6 @@ def ph_watch(viewkey: str):
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = blobUrl;
-        // Try to get filename from Content-Disposition or use fallback
         const cd = resp.headers.get('Content-Disposition') || '';
         const match = cd.match(/filename[*]?=["']?([^"';\\n]+)/i);
         a.download = match ? match[1].trim() : 'video.mp4';
@@ -1334,7 +1343,6 @@ def ph_watch(viewkey: str):
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
       }} catch (e) {{
-        // Fallback: open in new tab
         window.open(currentDlUrl, '_blank');
       }} finally {{
         dlBtn.textContent = '↓ Download';

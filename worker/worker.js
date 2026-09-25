@@ -160,10 +160,12 @@ async function serveWatchPage(viewkey, workerOrigin, apiKey) {
     const dlBtn = document.getElementById('dlBtn');
     let hls     = null;
     let currentDlUrl = '${escHtml(best.dl)}';
+    let currentFmt   = '${best.fmt}';
 
     function loadSrc(streamUrl, fmt, dlUrl) {
       const isHls = fmt === 'hls' || streamUrl.includes('.m3u8');
       currentDlUrl = dlUrl;
+      currentFmt   = fmt;
       if (hls) { hls.destroy(); hls = null; }
       if (isHls) {
         if (Hls.isSupported()) {
@@ -182,6 +184,11 @@ async function serveWatchPage(viewkey, workerOrigin, apiKey) {
     }
 
     dlBtn.addEventListener('click', async function() {
+      const isHls = currentFmt === 'hls';
+      if (isHls) {
+        window.open(currentDlUrl, '_blank');
+        return;
+      }
       dlBtn.textContent = 'Preparing...';
       dlBtn.disabled = true;
       try {
@@ -205,7 +212,6 @@ async function serveWatchPage(viewkey, workerOrigin, apiKey) {
         dlBtn.disabled = false;
       }
     });
-
     const first = sel.options[sel.selectedIndex];
     loadSrc(first.value, first.dataset.fmt, first.dataset.dl);
 
