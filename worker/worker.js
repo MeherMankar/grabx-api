@@ -274,13 +274,7 @@ async function handleRequest(request, apiKey) {
     return await proxyToRender(request, apiKey);
   }
 
-  // Watch pages — redirect to Render (these serve full HTML from Python)
-  const RENDER_WATCH_PATHS = ["/xv/watch", "/xnxx/watch", "/xh/watch"];
-  if (RENDER_WATCH_PATHS.includes(path)) {
-    return Response.redirect(`${RENDER_BASE}${path}${url.search}`, 302);
-  }
-
-  const PROXY_PATHS = ["/ph/proxy", "/proxy", "/adult/proxy"];
+  const PROXY_PATHS = ["/ph/proxy", "/proxy", "/adult/proxy", "/jav/proxy"];
 
   if (!PROXY_PATHS.includes(path)) {
     // /ph/watch/<viewkey> — serve player from Worker
@@ -329,12 +323,45 @@ async function handleRequest(request, apiKey) {
   const isPH      = path === "/ph/proxy";
   const isTerabox = path === "/proxy";
   const isAdult   = path === "/adult/proxy";
+  const isJav     = path === "/jav/proxy";
 
   // Terabox (/proxy): ndus cookie is IP-bound to Render's server IP.
-  // CF Worker uses random edge IPs — Terabox rejects with errno 400141.
-  // Always redirect Terabox requests to Render.
   if (isTerabox) {
     return Response.redirect(`${RENDER_BASE}${url.pathname}${url.search}`, 302);
+  }
+
+  // JAVtiful (/jav/proxy): plain fetch with Referer — no special TLS needed
+  if (isJav) {
+    const javHeaders = new Headers({
+      "Referer":         "https://javtiful.com/",
+      "Origin":          "https://javtiful.com",
+      "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Accept":          "*/*",
+      "Accept-Encoding": "identity",
+    });
+    const rng = request.headers.get("Range");
+    if (rng) javHeaders.set("Range", rng);
+
+    const javResp = await fetch(cdnUrl, { method: "GET", headers: javHeaders, redirect: "follow" });
+    if (!javResp.ok) {
+      return new Response(JSON.stringify({ status: "error", message: `CDN returned HTTP ${javResp.status}.` }),
+        { status: javResp.status, headers: { "Content-Type": "application/json" } });
+    }
+    const pathPart = new URL(cdnUrl).pathname;
+    const fname    = pathPart.split("/").pop() || "video.mp4";
+    const safeF    = fname.endsWith(".mp4") ? fname : fname + ".mp4";
+    const disp     = downloadMode ? `attachment; filename="${safeF}"` : `inline; filename="${safeF}"`;
+    const rh = new Headers({
+      "Content-Type":                javResp.headers.get("Content-Type") || "video/mp4",
+      "Content-Disposition":         disp,
+      "Accept-Ranges":               "bytes",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control":               "no-store",
+    });
+    for (const h of ["Content-Length", "Content-Range", "ETag"]) {
+      const v = javResp.headers.get(h); if (v) rh.set(h, v);
+    }
+    return new Response(javResp.body, { status: javResp.status, headers: rh });
   }
 
   // Derive correct Referer/Origin for CDN requests
@@ -522,11 +549,18 @@ export default {
       }
 
       // ---------------------------------------------------------------------------
-      // Terabox /download and PH /ph/download — proxy through to Render with
-      // wake-up retry. Worker has no timeout so it absorbs Render's 30s cold start.
+      // Proxy all download endpoints to Render with wake-up retry.
+      // Worker has no timeout so it absorbs Render's 30s cold start.
       // ---------------------------------------------------------------------------
-      if ((url.pathname === "/download" || url.pathname === "/ph/download") && request.method === "POST") {
+      const RENDER_POST_PATHS = ["/download", "/ph/download", "/xv/download", "/xnxx/download", "/xh/download", "/jav/download"];
+      if (RENDER_POST_PATHS.includes(url.pathname) && request.method === "POST") {
         return await proxyToRender(request, apiKey);
+      }
+
+      // Watch pages that live on Render — redirect there
+      const RENDER_WATCH_PATHS_ALL = ["/xv/watch", "/xnxx/watch", "/xh/watch", "/jav/watch"];
+      if (RENDER_WATCH_PATHS_ALL.includes(url.pathname)) {
+        return Response.redirect(`${RENDER_BASE}${url.pathname}${url.search}`, 302);
       }
 
       if (request.method !== "GET" && request.method !== "HEAD") {
