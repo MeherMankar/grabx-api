@@ -1820,7 +1820,10 @@ def jav_download():
         qualities = []
         for i, s in enumerate(result["streams"]):
             src   = s.get("src", "")
-            label = s.get("label") or s.get("type", "").replace("video/", "") or f"stream{i+1}"
+            # size field contains the quality (e.g. 720, 1080)
+            # label is usually absent, type is "video/mp4"
+            size  = str(s.get("size") or "").strip()
+            label = s.get("label") or (size if size.isdigit() else None) or s.get("type", "").replace("video/", "") or f"stream{i+1}"
             ql    = str(label)
             qualities.append({
                 "quality":      ql,
@@ -1869,7 +1872,8 @@ def jav_watch():
         qualities = []
         for i, s in enumerate(result["streams"]):
             src   = s.get("src", "")
-            label = s.get("label") or s.get("type", "").replace("video/", "") or f"stream{i+1}"
+            size  = str(s.get("size") or "").strip()
+            label = s.get("label") or (size if size.isdigit() else None) or s.get("type", "").replace("video/", "") or f"stream{i+1}"
             ql    = str(label)
             qualities.append({
                 "quality":      ql,
@@ -2012,22 +2016,38 @@ def _xv_extract_data(html: str, site_domain: str) -> dict:
     """
     Extract stream URLs from html5player JS calls and window.xv.conf fallback.
     Works for both Xvideos and XNXX.
+    Extracts: url_low (360p MP4), url_high (480p MP4), url_hls (master m3u8),
+              plus any higher quality MP4s (720p, 1080p) when available.
     """
     data: dict = {}
 
-    # html5player.setVideoUrl*() calls
-    patterns = {
-        "url_low":  r"html5player\.setVideoUrlLow\s*\(\s*['\"](.+?)['\"]\s*\)",
-        "url_high": r"html5player\.setVideoUrlHigh\s*\(\s*['\"](.+?)['\"]\s*\)",
-        "url_hls":  r"html5player\.setVideoUrlHls\s*\(\s*['\"](.+?)['\"]\s*\)",
-        "title":    r"html5player\.setVideoTitle\s*\(\s*['\"](.+?)['\"]\s*\)",
-        "thumb":    r"html5player\.setThumbUrl\s*\(\s*['\"](.+?)['\"]\s*\)",
-        "duration": r"html5player\.setVideoDuration\s*\(\s*(\d+)\s*\)",
-    }
-    for key, pat in patterns.items():
-        m = re.search(pat, html, re.IGNORECASE)
-        if m:
-            data[key] = m.group(1)
+    # html5player.setVideoUrl*() calls — capture ALL variants
+    all_calls = re.findall(
+        r"html5player\.(setVideo\w+)\s*\(\s*['\"]([^'\"]+)['\"]",
+        html, re.IGNORECASE
+    )
+    for method, value in all_calls:
+        method_lower = method.lower()
+        if "urlow" in method_lower or "urllow" in method_lower:
+            data["url_low"] = value
+        elif "urlhigh" in method_lower:
+            data["url_high"] = value
+        elif "urlhls" in method_lower or "hls" in method_lower:
+            data["url_hls"] = value
+        elif "url1080" in method_lower:
+            data["url_1080p"] = value
+        elif "url720" in method_lower:
+            data["url_720p"] = value
+        elif "url480" in method_lower:
+            data["url_480p"] = value
+        elif "url360" in method_lower:
+            data["url_360p"] = value
+        elif "title" in method_lower:
+            data["title"] = value
+        elif "thumburl" in method_lower and "169" not in method_lower and "slide" not in method_lower:
+            data.setdefault("thumb", value)
+        elif "duration" in method_lower:
+            data["duration"] = value
 
     # Fallback: window.xv.conf JSON
     if not data.get("url_low") and not data.get("url_high"):
@@ -2055,7 +2075,7 @@ def _xv_extract_data(html: str, site_domain: str) -> dict:
         if m:
             data["duration"] = m.group(1)
 
-    if not data.get("url_low") and not data.get("url_high") and not data.get("url"):
+    if not any(data.get(k) for k in ("url_low", "url_high", "url", "url_hls")):
         raise ValueError(
             f"No video stream URLs found. "
             f"Video may be premium-only, deleted, or {site_domain} page structure changed."
@@ -2066,27 +2086,76 @@ def _xv_extract_data(html: str, site_domain: str) -> dict:
 
 def _xv_build_qualities(data: dict, base_url: str, path: str,
                         viewkey: str, referer: str) -> list:
-    """Convert extracted data dict into the standard qualities list."""
+    """
+    Convert extracted data dict into the standard qualities list.
+    Priority: 1080p > 720p > 480p > url_high > url_low > HLS variants from manifest.
+    """
     qualities = []
-    url_map = {
-        "360": data.get("url_low") or data.get("url"),
-        "480": data.get("url_high"),
-        "hls": data.get("url_hls"),
-    }
-    for label, url in url_map.items():
-        if not url:
-            continue
-        fmt = "hls" if label == "hls" else "mp4"
-        ql  = label if label != "hls" else "hls"
-        qualities.append({
-            "quality":      ql,
-            "format":       fmt,
-            "url":          url,
-            "proxy_url":    _make_proxy_url(base_url, path, url, viewkey=viewkey, quality=ql),
-            "download_url": _make_proxy_url(base_url, path, url, extra="&dl=1", viewkey=viewkey, quality=ql),
-        })
-    # Sort MP4 best-first
-    qualities.sort(key=lambda e: (0, -int(e["quality"])) if e["quality"].isdigit() else (1, 0))
+
+    # Direct MP4 URLs — map to quality labels
+    mp4_map = [
+        ("1080", data.get("url_1080p")),
+        ("720",  data.get("url_720p")),
+        ("480",  data.get("url_480p") or data.get("url_high")),
+        ("360",  data.get("url_360p") or data.get("url_low") or data.get("url")),
+    ]
+    seen_urls = set()
+    for ql, url in mp4_map:
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            qualities.append({
+                "quality":      ql,
+                "format":       "mp4",
+                "url":          url,
+                "proxy_url":    _make_proxy_url(base_url, path, url, quality=ql),
+                "download_url": _make_proxy_url(base_url, path, url, extra="&dl=1", quality=ql),
+            })
+
+    # HLS master manifest — parse variants for additional quality info
+    hls_url = data.get("url_hls")
+    if hls_url:
+        try:
+            import requests as _req
+            r = _req.get(hls_url, headers={"Referer": referer}, timeout=8)
+            if r.status_code == 200:
+                manifest = r.text
+                # Parse EXT-X-STREAM-INF entries
+                stream_re = re.compile(
+                    r'#EXT-X-STREAM-INF:[^\n]*NAME="([^"]+)"[^\n]*\n([^\n]+)',
+                    re.IGNORECASE
+                )
+                for m in stream_re.finditer(manifest):
+                    name = m.group(1)   # e.g. "480p"
+                    seg_url = m.group(2).strip()
+                    # Resolve relative URL
+                    if not seg_url.startswith("http"):
+                        base_hls = hls_url[:hls_url.rfind("/") + 1]
+                        seg_url = base_hls + seg_url
+                    ql = name.replace("p", "")
+                    # Only add if we don't already have this quality as MP4
+                    if not any(q["quality"] == ql and q["format"] == "mp4" for q in qualities):
+                        qualities.append({
+                            "quality":      ql,
+                            "format":       "hls",
+                            "url":          seg_url,
+                            "proxy_url":    _make_proxy_url(base_url, path, seg_url, quality=ql),
+                            "download_url": _make_proxy_url(base_url, path, seg_url, extra="&dl=1", quality=ql),
+                        })
+        except Exception:
+            pass
+
+        # Add the HLS master itself as a fallback if no named variants found
+        if not any(q["format"] == "hls" for q in qualities):
+            qualities.append({
+                "quality":      "hls",
+                "format":       "hls",
+                "url":          hls_url,
+                "proxy_url":    _make_proxy_url(base_url, path, hls_url, quality="hls"),
+                "download_url": _make_proxy_url(base_url, path, hls_url, extra="&dl=1", quality="hls"),
+            })
+
+    # Sort: MP4 best-first, then HLS
+    qualities.sort(key=lambda q: (0, -int(q["quality"])) if q["quality"].isdigit() else (1, 0))
     return qualities
 
 
@@ -2167,7 +2236,14 @@ def _xh_cffi_session():
 
 
 def _xh_extract_data(html: str) -> dict:
-    """Extract stream URLs from window.initials JSON."""
+    """
+    Extract stream URLs from XHamster page HTML.
+    Note: XHamster encrypts MP4 source URLs in window.initials with a
+    rotating per-entry key from their proprietary JS player. We cannot
+    decrypt them server-side without executing their JavaScript.
+    We instead use the h264 quality labels to show available qualities,
+    and surface any clear m3u8 URLs found directly in the page.
+    """
     m = re.search(r'window\.initials\s*=\s*(\{.+?\})\s*;', html, re.DOTALL)
     if not m:
         raise ValueError(
@@ -2179,36 +2255,53 @@ def _xh_extract_data(html: str) -> dict:
     except json.JSONDecodeError as e:
         raise ValueError(f"Failed to parse XHamster initials JSON: {e}")
 
-    sources = (
-        initials.get("xplayerSettings", {}).get("sources", {})
-        or initials.get("videoModel", {}).get("sources", {})
-    )
+    xp      = initials.get("xplayerSettings", {})
+    sources = xp.get("sources", {}) or initials.get("videoModel", {}).get("sources", {})
     if not sources:
         raise ValueError("No sources found in XHamster initials JSON.")
 
     video_model = initials.get("videoModel", {})
-    secs = int(video_model.get("duration", 0) or 0)
+    vi          = xp.get("videoInfo", {})
+    secs        = int(video_model.get("duration", 0) or vi.get("duration", 0) or 0)
 
     qualities = []
-    for item in sources.get("mp4", []):
-        url = (item.get("url") or item.get("videoUrl") or "").strip()
-        ql  = str(item.get("quality") or "").replace("p", "").strip()
-        if url and ql:
-            qualities.append({"quality": ql, "format": "mp4", "url": url})
 
-    hls_src = sources.get("hls") or {}
-    hls_url = (hls_src.get("url") or hls_src.get("xplayerSources", {}).get("hls", {}).get("url") or "").strip()
-    if hls_url:
-        qualities.append({"quality": "hls", "format": "hls", "url": hls_url})
+    # h264 entries have quality labels but encrypted URLs
+    # Build quality list from the labels — mark encrypted ones
+    for item in sources.get("standard", {}).get("h264", []):
+        url_hex = (item.get("url") or "").strip()
+        ql      = str(item.get("quality") or item.get("label") or "").replace("p", "").strip()
+        if not ql or ql.lower() == "auto":
+            continue
+        qualities.append({
+            "quality":    ql,
+            "format":     "mp4",
+            "url":        "",           # encrypted — unusable without JS runtime
+            "_encrypted": True,
+            "_label":     f"{ql}p MP4 (encrypted — unavailable without browser)",
+        })
 
-    qualities.sort(key=lambda e: (0, -int(e["quality"])) if e["quality"].isdigit() else (1, 0))
+    # Look for any clear m3u8 in the page HTML
+    m3u8s = re.findall(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', html)
+    for m3u8 in m3u8s:
+        if "xhms" in m3u8 or "xham" in m3u8 or "xhcdn" in m3u8:
+            qualities.append({
+                "quality":    "hls",
+                "format":     "hls",
+                "url":        m3u8,
+                "_encrypted": False,
+            })
+
+    qualities.sort(key=lambda e: (0, -int(e["quality"])) if (e["quality"].isdigit() and not e.get("_encrypted"))
+                                 else (1, -int(e["quality"])) if e["quality"].isdigit()
+                                 else (2, 0))
 
     if not qualities:
         raise ValueError("No stream URLs found in XHamster sources.")
 
     return {
-        "title":            video_model.get("title", "Unknown Title"),
-        "thumbnail":        video_model.get("thumbURL", video_model.get("thumb", "")),
+        "title":            video_model.get("title", vi.get("title", "Unknown Title")),
+        "thumbnail":        video_model.get("thumbURL", video_model.get("thumb", vi.get("thumbUrl", ""))),
         "duration":         f"{secs // 60}:{secs % 60:02d}" if secs else "",
         "duration_seconds": secs,
         "qualities":        qualities,
@@ -2377,14 +2470,32 @@ def xh_download():
         qualities = []
         for q in result["qualities"]:
             ql = q["quality"]
-            qualities.append({
-                **q,
-                "proxy_url":    _make_proxy_url(base_url, "/adult/proxy", q["url"], quality=ql),
-                "download_url": _make_proxy_url(base_url, "/adult/proxy", q["url"], extra="&dl=1", quality=ql),
-            })
-        if not qualities:
-            return jsonify({"status": "error", "message": "No streams found."}), 404
-        best = next((q for q in qualities if q["format"] == "mp4"), qualities[0])
+            if q.get("_encrypted") or not q.get("url"):
+                # Show quality label but mark as unavailable
+                qualities.append({
+                    "quality":      ql,
+                    "format":       q["format"],
+                    "available":    False,
+                    "note":         "URL encrypted — requires browser to decode",
+                })
+            else:
+                qualities.append({
+                    "quality":      ql,
+                    "format":       q["format"],
+                    "available":    True,
+                    "url":          q["url"],
+                    "proxy_url":    _make_proxy_url(base_url, "/adult/proxy", q["url"], quality=ql),
+                    "download_url": _make_proxy_url(base_url, "/adult/proxy", q["url"], extra="&dl=1", quality=ql),
+                })
+        usable = [q for q in qualities if q.get("available")]
+        if not usable:
+            return jsonify({
+                "status": "error",
+                "message": "XHamster video URLs are encrypted by their player JS. "
+                           "Cannot be decoded server-side. Available qualities detected: "
+                           + ", ".join(q["quality"] + "p" for q in qualities if q["quality"].isdigit()),
+            }), 422
+        best = next((q for q in usable if q["format"] == "mp4"), usable[0])
         return jsonify({
             "status": "success",
             "data": {
@@ -2393,9 +2504,9 @@ def xh_download():
                 "duration":          result["duration"],
                 "duration_seconds":  result["duration_seconds"],
                 "qualities":         qualities,
-                "best_proxy_url":    best["proxy_url"],
-                "best_download_url": best["download_url"],
-                "note": "Use best_proxy_url to stream or best_download_url to download.",
+                "best_proxy_url":    best.get("proxy_url", ""),
+                "best_download_url": best.get("download_url", ""),
+                "note": "XHamster MP4 URLs are encrypted. HLS streams (if any) are usable directly.",
             },
         })
     except ValueError as e:
@@ -2416,6 +2527,8 @@ def xh_watch():
         qualities = []
         for q in result["qualities"]:
             ql = q["quality"]
+            if q.get("_encrypted") or not q.get("url"):
+                continue  # skip unusable entries in the player
             qualities.append({
                 **q,
                 "proxy_url":    _make_proxy_url(base_url, "/adult/proxy", q["url"], quality=ql),
