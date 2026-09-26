@@ -532,8 +532,8 @@ export default {
         return new Response(null, {
           headers: {
             "Access-Control-Allow-Origin":  "*",
-            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-            "Access-Control-Allow-Headers": "Range, Content-Type",
+            "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Range, Content-Type, X-API-Key, Authorization",
             "Access-Control-Max-Age":       "86400",
           },
         });
