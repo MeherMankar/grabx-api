@@ -2550,10 +2550,14 @@ def _render_watch_page(meta: dict, qualities: list):
         key=lambda q: (0, -int(q["quality"])) if q["quality"].isdigit() else (1, 0),
     )
 
+    def _html_attr(url: str) -> str:
+        """Escape a URL for use in an HTML attribute value."""
+        return url.replace("&", "&amp;").replace('"', "&quot;")
+
     options_html = "\n".join(
-        f'<option value="{quote(o.get("proxy_url",""), safe="")}" '
+        f'<option value="{_html_attr(o.get("proxy_url",""))}" '
         f'data-fmt="{o["format"]}" '
-        f'data-dl="{quote(o.get("download_url",""), safe="")}">'
+        f'data-dl="{_html_attr(o.get("download_url",""))}">'
         f'{o["quality"]}{"p" if o["quality"].isdigit() else ""} {o["format"].upper()}'
         f'</option>'
         for o in sorted_opts
