@@ -249,6 +249,8 @@ def render_watch_page(meta: dict, qualities: list):
     function loadSrc(streamUrl, fmt, dlUrl) {{
       const isHls = fmt === 'hls' || streamUrl.includes('.m3u8');
       currentDlUrl = dlUrl; currentFmt = fmt;
+      // Update button label based on format
+      dlBtn.textContent = isHls ? '📋 Copy Stream URL' : '↓ Download';
       if (hls) {{ hls.destroy(); hls = null; }}
       if (isHls) {{
         if (Hls.isSupported()) {{
@@ -265,7 +267,20 @@ def render_watch_page(meta: dict, qualities: list):
     }}
 
     dlBtn.addEventListener('click', async function() {{
-      if (currentFmt === 'hls') {{ window.open(currentDlUrl, '_blank'); return; }}
+      if (currentFmt === 'hls') {{
+        // HLS can't be downloaded as a single file in the browser.
+        // Copy the stream URL to clipboard and show a message.
+        try {{
+          await navigator.clipboard.writeText(currentDlUrl);
+          dlBtn.textContent = '✓ URL Copied!';
+          setTimeout(() => {{ dlBtn.textContent = '↓ Download'; }}, 2000);
+        }} catch(e) {{
+          // Fallback: prompt user to copy manually
+          const msg = 'HLS stream URL (copy and open in VLC):\\n' + currentDlUrl;
+          prompt('HLS stream — open in VLC or copy URL:', currentDlUrl);
+        }}
+        return;
+      }}
       dlBtn.textContent = 'Preparing...'; dlBtn.disabled = true;
       try {{
         const resp = await fetch(currentDlUrl);

@@ -215,14 +215,19 @@ async function serveWatchPage(viewkey, workerOrigin, apiKey, apiBase) {
     const video=document.getElementById('player'),sel=document.getElementById('qualitySelect'),dlBtn=document.getElementById('dlBtn');
     let hls=null,currentDlUrl='${bestDlJs}',currentFmt='${best.fmt}';
     function loadSrc(u,fmt,dl){
-      currentDlUrl=dl;currentFmt=fmt;       if(hls){hls.destroy();hls=null;}
+      currentDlUrl=dl;currentFmt=fmt;
+      dlBtn.textContent=(fmt==='hls'||u.includes('.m3u8'))?'📋 Copy Stream URL':'↓ Download';       if(hls){hls.destroy();hls=null;}
       if(fmt==='hls'||u.includes('.m3u8')){
         if(Hls.isSupported()){hls=new Hls({enableWorker:true});hls.loadSource(u);hls.attachMedia(video);hls.on(Hls.Events.MANIFEST_PARSED,()=>video.play().catch(()=>{}));}
         else if(video.canPlayType('application/vnd.apple.mpegurl')){video.src=u;video.play().catch(()=>{});}
       }else{video.src=u;video.load();}
     }
     dlBtn.addEventListener('click',async function(){
-      if(currentFmt==='hls'){window.open(currentDlUrl,'_blank');return;}
+      if(currentFmt==='hls'){
+        try{await navigator.clipboard.writeText(currentDlUrl);dlBtn.textContent='✓ Copied!';setTimeout(()=>{dlBtn.textContent='📋 Copy Stream URL';},2000);}
+        catch(e){prompt('HLS stream URL (open in VLC):',currentDlUrl);}
+        return;
+      }
       dlBtn.textContent='Preparing...';dlBtn.disabled=true;
       try{
         const resp=await fetch(currentDlUrl);if(!resp.ok)throw new Error('HTTP '+resp.status);
