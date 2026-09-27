@@ -139,7 +139,21 @@ def extract_data(html: str) -> dict:
         if hls_hex:
             decrypted = decrypt_url(hls_hex)
             if decrypted.startswith("http"):
-                qualities.append({"quality": "hls", "format": "hls", "url": decrypted})
+                if "_TPL_" in decrypted:
+                    # XHamster HLS URL is a template — expand into per-quality manifests.
+                    # The URL contains multi=WxH:label:,... which lists all variants.
+                    # e.g. multi=256x144:144p:,426x240:240p:,854x480:480p:,1280x720:720p:,...
+                    # Replace _TPL_ with each label to get the real manifest URL.
+                    import re as _re
+                    variants = _re.findall(r'\d+x\d+:(\d+p):', decrypted)
+                    for label in variants:
+                        ql  = label.replace("p", "")
+                        url = decrypted.replace("_TPL_", label)
+                        # Only add if we don't already have this quality as MP4
+                        if not any(q["quality"] == ql and q["format"] == "mp4" for q in qualities):
+                            qualities.append({"quality": ql, "format": "hls", "url": url})
+                else:
+                    qualities.append({"quality": "hls", "format": "hls", "url": decrypted})
                 break
 
     qualities.sort(key=lambda e: (0, -int(e["quality"])) if e["quality"].isdigit() else (1, 0))
