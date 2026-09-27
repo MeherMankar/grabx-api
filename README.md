@@ -1,13 +1,28 @@
 # GrabX API
 
 [![GitHub](https://img.shields.io/badge/GitHub-MeherMankar%2Fgrabx--api-blue?logo=github)](https://github.com/MeherMankar/grabx-api)
-[![Live API](https://img.shields.io/badge/Live%20API-onrender.com-brightgreen?logo=render)](https://grabx-api.onrender.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 A self-hosted Flask API that extracts direct download/stream links from multiple video platforms — no third-party services, deployable on Render in minutes.
 
 **Maintained by:** [MeherMankar](https://github.com/MeherMankar) · [Telegram](https://t.me/MeherPatil)  
 **Terabox base by:** [genxnano](https://t.me/genxnano)
+
+---
+
+## Deploy
+
+| Platform | Free | Card needed | Cold start | Speed |
+|----------|------|-------------|------------|-------|
+| **Koyeb** | ✅ | ❌ | ❌ (always warm) | ⚡⚡⚡ |
+| **Render** | ✅ | ❌ | ✅ (sleeps after 15m) | ⚡⚡ |
+| **Heroku** | ✅ (eco dynos) | ✅ | ✅ | ⚡⚡ |
+
+[![Deploy to Koyeb](https://www.koyeb.com/static/images/deploy/button.svg)](https://app.koyeb.com/deploy?type=git&repository=github.com/MeherMankar/grabx-api&branch=master&name=grabx-api&build_command=&run_command=gunicorn%20api.index%3Aapp%20--bind%200.0.0.0%3A8000%20--workers%201%20--threads%204%20--timeout%20120%20--worker-class%20gthread&instance_type=free&env[0][name]=TERABOX_COOKIE&env[0][secret]=true&env[1][name]=API_KEY&env[1][secret]=true&env[2][name]=CF_WORKER_URL&env[2][value]=&ports[0][port]=8000&ports[0][protocol]=http)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/MeherMankar/grabx-api)
+
+[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/MeherMankar/grabx-api)
 
 ---
 
@@ -110,26 +125,51 @@ API available at `http://localhost:5000`.
 
 ## Deploy to Render
 
-1. Push this repo to GitHub
+1. Click the **Deploy to Render** button above, or go to [render.com](https://render.com) → **New → Web Service** → connect repo
 
-2. Go to [render.com](https://render.com) → **New → Web Service** → connect repo
-
-3. Render auto-detects the `Dockerfile`:
+2. Render auto-detects the `Dockerfile`:
 
    | Setting | Value |
    |---------|-------|
    | Environment | Docker |
    | Port | 8000 |
 
-4. Add environment variables:
+3. Add environment variables:
 
    | Name | Value |
    |------|-------|
    | `TERABOX_COOKIE` | `ndus=VALUE1,ndus=VALUE2` |
    | `API_KEY` | `your_secret_key` *(optional)* |
-   | `CF_WORKER_URL` | `https://grabx-api.yourname.workers.dev` *(optional — see below)* |
+   | `CF_WORKER_URL` | `https://grabx-api.yourname.workers.dev` *(optional)* |
 
-5. Click **Deploy**
+4. Click **Deploy**
+
+> **Note:** Render free tier sleeps after 15 min of inactivity (30s cold start). Use UptimeRobot to ping `/health` every 5 min to keep it warm.
+
+---
+
+## Deploy to Koyeb *(recommended — no cold starts)*
+
+1. Click the **Deploy to Koyeb** button above
+2. Set these env vars in the Koyeb dashboard:
+
+   | Name | Value |
+   |------|-------|
+   | `TERABOX_COOKIE` | `ndus=VALUE1,ndus=VALUE2` |
+   | `API_KEY` | `your_secret_key` *(optional)* |
+   | `CF_WORKER_URL` | `https://grabx-api.yourname.workers.dev` *(optional)* |
+
+3. Click **Deploy** → you get `grabx-api-xxx.koyeb.app`
+
+---
+
+## Deploy to Heroku
+
+1. Click the **Deploy to Heroku** button above
+2. Fill in the config vars on the Heroku deploy page
+3. Click **Deploy app**
+
+> Requires a Heroku account with eco dyno credits ($5/month or free with student pack).
 
 ---
 
