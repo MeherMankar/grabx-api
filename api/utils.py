@@ -103,15 +103,12 @@ def make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
                    viewkey: str = "", quality: str = "", src_domain: str = "") -> str:
     """
     Build a signed proxy URL.
-
-    Routing rules:
-    - /ph/proxy   → CF Worker (PH CDN signed to Render IP; Worker auto-refreshes via viewkey)
-    - /jav/proxy  → CF Worker (JAV CDN not IP-locked)
-    - /adult/proxy → Render only — XHamster/Xvideos/XNXX CDN URLs embed the
-                     requesting IP (data=<IP>). CF Worker edge IPs differ from
-                     Render's, causing 403. Must stream through Render.
-    - /proxy      → Render only (Terabox ndus cookie is IP-locked)
+    Routes /ph/proxy, /jav/proxy through CF Worker when configured.
+    /proxy (Terabox) and /adult/proxy always stay on the API server (IP-locked CDN).
     """
+    # Force https — Koyeb/Render may pass http in request.host_url via proxy headers
+    base_url = base_url.replace("http://", "https://")
+
     if CF_WORKER_URL and path in ("/ph/proxy", "/jav/proxy"):
         proxy_base = CF_WORKER_URL
     else:
