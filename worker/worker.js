@@ -207,15 +207,18 @@ async function serveWatchPage(viewkey, workerOrigin, apiKey, apiBase) {
     <div class="controls">
       <select id="qualitySelect">${optionsHtml}</select>
       <button id="dlBtn" class="btn btn-dl">&#8595; Download</button>
+      <a id="directLink" class="btn" href="${escHtml(best.proxy)}" target="_blank" style="background:#333;color:#eee;font-size:.8rem">&#8599; Open stream</a>
     </div>
     <div class="meta">${duration ? `Duration: ${escHtml(duration)} &nbsp;&middot;&nbsp; ` : ""}Powered by <a href="https://github.com/MeherMankar/grabx-api" target="_blank">GrabX API</a></div>
+    <p style="margin-top:8px;font-size:.75rem;color:#555;text-align:center">💡 Right-click <b style="color:#aaa">Open stream</b> → "Save link as" to download · HLS streams: open in VLC</p>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <script>
-    const video=document.getElementById('player'),sel=document.getElementById('qualitySelect'),dlBtn=document.getElementById('dlBtn');
+    const video=document.getElementById('player'),sel=document.getElementById('qualitySelect'),dlBtn=document.getElementById('dlBtn'),directLink=document.getElementById('directLink');
     let hls=null,currentDlUrl='${bestDlJs}',currentFmt='${best.fmt}';
     function loadSrc(u,fmt,dl){
       currentDlUrl=dl;currentFmt=fmt;
+      directLink.href=u;
       dlBtn.textContent=(fmt==='hls'||u.includes('.m3u8'))?'📋 Copy Stream URL':'↓ Download';       if(hls){hls.destroy();hls=null;}
       if(fmt==='hls'||u.includes('.m3u8')){
         if(Hls.isSupported()){hls=new Hls({enableWorker:true});hls.loadSource(u);hls.attachMedia(video);hls.on(Hls.Events.MANIFEST_PARSED,()=>video.play().catch(()=>{}));}
@@ -227,8 +230,7 @@ async function serveWatchPage(viewkey, workerOrigin, apiKey, apiBase) {
         try{await navigator.clipboard.writeText(currentDlUrl);dlBtn.textContent='✓ Copied!';setTimeout(()=>{dlBtn.textContent='📋 Copy Stream URL';},2000);}
         catch(e){prompt('HLS stream URL (open in VLC):',currentDlUrl);}
         return;
-      }
-      dlBtn.textContent='Preparing...';dlBtn.disabled=true;
+      }      dlBtn.textContent='Preparing...';dlBtn.disabled=true;
       try{
         const resp=await fetch(currentDlUrl);if(!resp.ok)throw new Error('HTTP '+resp.status);
         const blob=await resp.blob(),blobUrl=URL.createObjectURL(blob),a=document.createElement('a');
