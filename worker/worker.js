@@ -241,7 +241,7 @@ function rewriteToWorker(proxyUrl, workerOrigin) {
   }
 }
 
-functio nescHtml(str) {
+function escHtml(str) {
   return String(str || "")
     .replace(/&/g, "&amp;")
     .replace(/"/g, "&quot;")
