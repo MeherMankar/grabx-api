@@ -349,7 +349,35 @@ async function handleRequest(request, apiKey, apiBase) {
   });
   if (request.headers.get("Range")) cdHeaders.set("Range", request.headers.get("Range"));
 
-  const cdnResp = await fetch(cdnUrl, { method: "GET", headers: cdHeaders, redirect: "follow" });
+  let cdnResp = await fetch(cdnUrl, { method: "GET", headers: cdHeaders, redirect: "follow" });
+
+  // Auto-refresh expired/IP-locked CDN links using the viewkey
+  if ([403, 410, 451].includes(cdnResp.status) && viewkey && apiBase) {
+    try {
+      const apiHeaders = { "Content-Type": "application/json" };
+      if (apiKey) apiHeaders["X-API-Key"] = apiKey;
+      const refreshResp = await fetch(`${apiBase}/ph/download`, {
+        method: "POST", headers: apiHeaders,
+        body: JSON.stringify({ url: `https://www.pornhub.com/view_video.php?viewkey=${viewkey}` }),
+      });
+      if (refreshResp.ok) {
+        const { data } = await refreshResp.json();
+        const freshQuals = data?.qualities || [];
+        // Find matching quality or fall back to best
+        const isHlsStream = isM3u8;
+        const target = freshQuals.find(q =>
+          q.quality === quality && q.format === (isHlsStream ? "hls" : "mp4")
+        ) || freshQuals.find(q => q.format === (isHlsStream ? "hls" : "mp4"))
+          || freshQuals[0];
+        if (target?.url) {
+          cdnUrl = target.url;
+          cdnResp = await fetch(cdnUrl, { method: "GET", headers: cdHeaders, redirect: "follow" });
+        }
+      }
+    } catch (e) {
+      // fall through to error response
+    }
+  }
 
   if (isM3u8 && cdnResp.ok) {
     const text = await cdnResp.text();

@@ -233,15 +233,17 @@ def render_watch_page(meta: dict, qualities: list):
     <div class="controls">
       <select id="qualitySelect">{options_html}</select>
       <button id="dlBtn" class="btn btn-dl">&#8595; Download</button>
+      <a id="directLink" class="btn" href="{html_attr(best.get('proxy_url',''))}" target="_blank" style="background:#333;color:#eee;font-size:.8rem">&#8599; Open stream</a>
     </div>
     <div class="meta">{'Duration: ' + duration + ' &nbsp;·&nbsp; ' if duration else ''}Powered by <a href="https://github.com/MeherMankar/grabx-api" target="_blank">GrabX API</a></div>
-    <p class="note">Tip: right-click the video &rarr; "Save video as" to download directly.</p>
+    <p class="note">💡 Right-click <b>Open stream</b> → "Save link as" to download. For HLS: open in VLC.</p>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <script>
     const video = document.getElementById('player');
     const sel   = document.getElementById('qualitySelect');
     const dlBtn = document.getElementById('dlBtn');
+    const directLink = document.getElementById('directLink');
     let hls     = null;
     let currentDlUrl = '{best_dl}';
     let currentFmt   = '{best_fmt}';
@@ -249,6 +251,7 @@ def render_watch_page(meta: dict, qualities: list):
     function loadSrc(streamUrl, fmt, dlUrl) {{
       const isHls = fmt === 'hls' || streamUrl.includes('.m3u8');
       currentDlUrl = dlUrl; currentFmt = fmt;
+      directLink.href = streamUrl;
       // Update button label based on format
       dlBtn.textContent = isHls ? '📋 Copy Stream URL' : '↓ Download';
       if (hls) {{ hls.destroy(); hls = null; }}
