@@ -241,7 +241,7 @@ function rewriteToWorker(proxyUrl, workerOrigin) {
   }
 }
 
-function escHtml(str) {
+functio nescHtml(str) {
   return String(str || "")
     .replace(/&/g, "&amp;")
     .replace(/"/g, "&quot;")
@@ -523,14 +523,23 @@ async function proxyToRender(request, apiKey) {
 // ---------------------------------------------------------------------------
 // Entry point — everything inside try/catch
 // ---------------------------------------------------------------------------
+// API_BASE_URL: set this as a Worker secret to point to your deployment.
+// Supports Koyeb, Render, Railway, or any other host.
+// Default falls back to Render.
+// Set via: npx wrangler secret put API_BASE_URL
+// ---------------------------------------------------------------------------
 
-const RENDER_BASE = "https://grabx-api.onrender.com";
+let RENDER_BASE = "https://grabx-api.onrender.com"; // overridden in fetch() from env
 
 export default {
   async fetch(request, env, ctx) {
     try {
       const apiKey = (env && env.API_KEY) ? String(env.API_KEY) : "";
       globalThis.TERABOX_COOKIE = (env && env.TERABOX_COOKIE) ? String(env.TERABOX_COOKIE) : "";
+      // API_BASE_URL lets you point the Worker at Koyeb, Railway, or any host
+      if (env && env.API_BASE_URL) {
+        RENDER_BASE = String(env.API_BASE_URL).replace(/\/$/, "");
+      }
       const url    = new URL(request.url);
 
       // CORS preflight
@@ -548,9 +557,10 @@ export default {
       // Health check
       if (url.pathname === "/") {
         return new Response(JSON.stringify({
-          status:  "ok",
-          service: "grabx-proxy worker",
-          auth:    apiKey ? "enabled" : "disabled (API_KEY not set)",
+          status:   "ok",
+          service:  "grabx-proxy worker",
+          auth:     apiKey ? "enabled" : "disabled (API_KEY not set)",
+          api_base: RENDER_BASE,
         }), { headers: { "Content-Type": "application/json" } });
       }
 
