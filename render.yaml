@@ -1,9 +1,15 @@
 services:
   - type: web
-    name: terabox-downloader-api
+    name: grabx-api
     runtime: docker
     dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
     envVars:
       - key: TERABOX_COOKIE
-        sync: false   # set manually in Render dashboard
-    healthCheckPath: /
+        sync: false        # set in Render dashboard: ndus=VALUE1,ndus=VALUE2
+      - key: API_KEY
+        sync: false        # optional — leave blank for open access
+      - key: CF_WORKER_URL
+        sync: false        # optional — your CF Worker URL for zero-bandwidth streaming
+      - key: PROXY_TOKEN_TTL_HOURS
+        value: "24"

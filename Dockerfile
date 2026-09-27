@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# curl_cffi needs libcurl + CA certs; also need gcc for any native builds
+# curl_cffi needs libcurl + CA certs; gcc for any native builds
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libcurl4 \
@@ -14,5 +14,21 @@ COPY . /app
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# 1 worker to stay within free-tier RAM (~512MB); timeout 60s covers PH scrape + get_media call
-CMD ["gunicorn", "api.index:app", "--bind", "0.0.0.0:8000", "--workers", "1", "--timeout", "60", "--worker-class", "gthread", "--threads", "4"]
+# PORT env var is set by Render / Koyeb / Railway automatically.
+# Default to 8000 if not set.
+ENV PORT=8000
+
+# Gunicorn config:
+#   --workers 1        keeps RAM under free-tier limits (~512MB)
+#   --threads 4        handles concurrent requests within the single worker
+#   --timeout 120      gives streaming proxies 2 min before killing a request
+#   --keep-alive 5     reuse connections (faster for bots making many requests)
+#   --worker-class gthread  thread-based async (needed for streaming responses)
+CMD gunicorn api.index:app \
+    --bind 0.0.0.0:${PORT} \
+    --workers 1 \
+    --threads 4 \
+    --timeout 120 \
+    --keep-alive 5 \
+    --worker-class gthread \
+    --log-level info

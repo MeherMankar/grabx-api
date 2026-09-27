@@ -1,0 +1,30 @@
+name: grabx-api
+services:
+  - name: grabx-api
+    type: web
+    git:
+      repository: github.com/MeherMankar/grabx-api
+      branch: master
+    docker:
+      dockerfile: Dockerfile
+    instance_type: free
+    regions:
+      - was         # Washington DC — good for US/Asia latency
+    ports:
+      - port: 8000
+        protocol: http
+    health_checks:
+      - http:
+          path: /health
+          port: 8000
+    env:
+      - name: TERABOX_COOKIE
+        value: ""          # set in Koyeb dashboard
+        secret: true
+      - name: API_KEY
+        value: ""          # set in Koyeb dashboard
+        secret: true
+      - name: CF_WORKER_URL
+        value: ""          # optional
+      - name: PROXY_TOKEN_TTL_HOURS
+        value: "24"
