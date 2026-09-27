@@ -126,19 +126,25 @@ def _resolve_get_media(get_media_url: str) -> list:
             http_version=3, doh_url="https://1.1.1.1/dns-query",
         )
         if r.status_code != 200:
-            print(f"[get_media] HTTP {r.status_code}: {r.text[:200]}", file=sys.stderr)
+            print(f"[get_media] HTTP {r.status_code}: {r.text[:300]}", file=sys.stderr)
             return []
         items = r.json()
+        print(f"[get_media] response type={type(items).__name__} len={len(items) if isinstance(items, list) else 'N/A'}", file=sys.stderr)
         if not isinstance(items, list):
+            print(f"[get_media] non-list response: {str(items)[:300]}", file=sys.stderr)
             return []
         entries = []
         for item in items:
             video_url = (item.get("videoUrl") or "").strip()
             quality   = str(item.get("quality") or "").strip()
             fmt       = str(item.get("format") or "mp4").lower()
+            # Log each item for debugging
+            if not video_url or not quality:
+                print(f"[get_media] skipped item: quality={quality!r} url={video_url[:40]!r} fmt={fmt!r}", file=sys.stderr)
             if video_url and quality:
                 entries.append({"quality": quality, "url": video_url, "format": fmt})
         entries.sort(key=lambda e: -int(e["quality"]) if e["quality"].isdigit() else 0)
+        print(f"[get_media] returning {len(entries)} entries", file=sys.stderr)
         return entries
     except Exception as e:
         print(f"[get_media] exception: {e}", file=sys.stderr)
