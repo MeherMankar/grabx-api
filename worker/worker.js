@@ -1,7 +1,12 @@
 /**
  * GrabX CDN Proxy — Cloudflare Worker
- * Proxies PH and Terabox CDN streams with correct headers.
- * Routes: /ph/proxy and /proxy
+ *
+ * Required Worker secrets/variables (set in CF dashboard or via wrangler):
+ *   API_BASE_URL  — URL of your API deployment (Koyeb/Render/Railway/etc.)
+ *   API_KEY       — same value as on your API deployment
+ *
+ * Optional:
+ *   TERABOX_COOKIE — not used directly by the Worker (Terabox proxied via API)
  */
 
 // ---------------------------------------------------------------------------
@@ -10,22 +15,16 @@
 
 async function verifyToken(cdnUrl, tokenB64, expiryStr, apiKey) {
   apiKey = (apiKey || "").trim();
-  if (!apiKey) return true; // open mode
-
+  if (!apiKey) return true;
   const expiry = parseInt(expiryStr, 10);
   if (isNaN(expiry) || Date.now() / 1000 > expiry) return false;
-
-  const msg    = `${expiry}:${cdnUrl}`;
-  const key    = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(apiKey),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["verify"],
+  const msg  = `${expiry}:${cdnUrl}`;
+  const key  = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(apiKey),
+    { name: "HMAC", hash: "SHA-256" }, false, ["verify"],
   );
   const padded = tokenB64.replace(/-/g, "+").replace(/_/g, "/");
-  const pad    = (4 - (padded.length % 4)) % 4;
-  const b64    = padded + "=".repeat(pad);
+  const b64    = padded + "=".repeat((4 - (padded.length % 4)) % 4);
   let binary;
   try { binary = atob(b64); } catch { return false; }
   const sigBuf = Uint8Array.from(binary, c => c.charCodeAt(0));
@@ -38,8 +37,8 @@ async function verifyToken(cdnUrl, tokenB64, expiryStr, apiKey) {
 
 function resolveHlsUri(uri, baseDir, baseOrigin) {
   if (/^https?:\/\//i.test(uri)) return uri;
-  if (uri.startsWith("//"))       return "https:" + uri;
-  if (uri.startsWith("/"))        return baseOrigin + uri;
+  if (uri.startsWith("//"))      return "https:" + uri;
+  if (uri.startsWith("/"))       return baseOrigin + uri;
   return baseDir + uri;
 }
 
@@ -56,7 +55,6 @@ function rewriteManifest(text, cdnUrl, workerBase, extraParams) {
   const parsed  = new URL(cdnUrl);
   const baseDir = cdnUrl.slice(0, cdnUrl.lastIndexOf("/") + 1);
   const origin  = parsed.origin;
-
   return text.split("\n").map(line => {
     const stripped = line.trim();
     if (!stripped) return line;
@@ -66,187 +64,29 @@ function rewriteManifest(text, cdnUrl, workerBase, extraParams) {
         return `URI="${buildProxyUrl(workerBase, "/ph/proxy", abs, extraParams)}"`;
       });
     }
-    const abs = resolveHlsUri(stripped, baseDir, origin);
-    return buildProxyUrl(workerBase, "/ph/proxy", abs, extraParams);
+    return buildProxyUrl(workerBase, "/ph/proxy", resolveHlsUri(stripped, baseDir, origin), extraParams);
   }).join("\n");
 }
 
 // ---------------------------------------------------------------------------
-// Watch page — fetch qualities from Render and serve an HLS.js player
+// Helpers
 // ---------------------------------------------------------------------------
 
-async function serveWatchPage(viewkey, workerOrigin, apiKey) {
-  try {
-    const apiHeaders = { "Content-Type": "application/json" };
-    if (apiKey) apiHeaders["X-API-Key"] = apiKey;
-
-    const r = await fetch(`${RENDER_BASE}/ph/download`, {
-      method: "POST",
-      headers: apiHeaders,
-      body: JSON.stringify({ url: `https://www.pornhub.com/view_video.php?viewkey=${viewkey}` }),
-    });
-
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({ message: `HTTP ${r.status}` }));
-      return errorPage(err.message || `Render API returned ${r.status}`);
-    }
-
-    const { data } = await r.json();
-    const title     = data.title     || "Video";
-    const thumbnail = data.thumbnail || "";
-    const duration  = data.duration  || "";
-    const qualities = data.qualities || [];
-
-    if (!qualities.length) return errorPage("No streams found for this video.");
-
-    // Rewrite proxy URLs to point to this Worker instead of Render
-    const opts = qualities.map(q => {
-      const proxyUrl = rewriteToWorker(q.proxy_url, workerOrigin);
-      const dlUrl    = rewriteToWorker(q.download_url, workerOrigin);
-      return { label: `${q.quality}p ${q.format.toUpperCase()}`, fmt: q.format, proxy: proxyUrl, dl: dlUrl };
-    });
-
-    const optionsHtml = opts.map(o =>
-      `<option value="${escHtml(o.proxy)}" data-fmt="${o.fmt}" data-dl="${escHtml(o.dl)}">${escHtml(o.label)}</option>`
-    ).join("\n");
-
-    const best = opts[0];
-
-    const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-  <title>${escHtml(title)}</title>
-  <style>
-    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-    body{background:#0f0f0f;color:#eee;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-         min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:24px 16px 48px}
-    .container{width:100%;max-width:960px}
-    h1{font-size:1.15rem;font-weight:600;margin-bottom:14px;line-height:1.4;color:#fff}
-    .player-wrap{position:relative;width:100%;background:#000;border-radius:8px;overflow:hidden}
-    video{width:100%;display:block;max-height:540px;background:#000}
-    .controls{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}
-    select{background:#1e1e1e;color:#eee;border:1px solid #444;border-radius:6px;
-           padding:8px 12px;font-size:.9rem;cursor:pointer;flex:1;min-width:120px}
-    select:focus{outline:none;border-color:#f90}
-    .btn{display:inline-flex;align-items:center;gap:6px;font-weight:700;font-size:.9rem;
-         padding:9px 18px;border-radius:6px;text-decoration:none;white-space:nowrap;transition:background .15s;cursor:pointer;border:none}
-    .btn-dl{background:#f90;color:#000}.btn-dl:hover{background:#e88600}
-    .btn-dl:disabled{background:#666;cursor:not-allowed}
-    .meta{margin-top:10px;font-size:.8rem;color:#666}
-    .note{margin-top:16px;font-size:.75rem;color:#444;text-align:center}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>${escHtml(title)}</h1>
-    <div class="player-wrap">
-      <video id="player" controls preload="metadata" poster="${escHtml(thumbnail)}">
-        Your browser does not support HTML5 video.
-      </video>
-    </div>
-    <div class="controls">
-      <select id="qualitySelect">${optionsHtml}</select>
-      <button id="dlBtn" class="btn btn-dl">&#8595; Download</button>
-    </div>
-    <div class="meta">${duration ? `Duration: ${escHtml(duration)} &nbsp;&middot;&nbsp; ` : ""}Powered by <a href="https://github.com/MeherMankar/grabx-api" target="_blank" style="color:#f90;text-decoration:none">GrabX API</a></div>
-    <p class="note">Tip: right-click the video &rarr; "Save video as" to download directly from CDN.</p>
-  </div>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
-  <script>
-    const video = document.getElementById('player');
-    const sel   = document.getElementById('qualitySelect');
-    const dlBtn = document.getElementById('dlBtn');
-    let hls     = null;
-    let currentDlUrl = '${escHtml(best.dl)}';
-    let currentFmt   = '${best.fmt}';
-
-    function loadSrc(streamUrl, fmt, dlUrl) {
-      const isHls = fmt === 'hls' || streamUrl.includes('.m3u8');
-      currentDlUrl = dlUrl;
-      currentFmt   = fmt;
-      if (hls) { hls.destroy(); hls = null; }
-      if (isHls) {
-        if (Hls.isSupported()) {
-          hls = new Hls({ enableWorker: true });
-          hls.loadSource(streamUrl);
-          hls.attachMedia(video);
-          hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
-        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-          video.src = streamUrl;
-          video.play().catch(() => {});
-        }
-      } else {
-        video.src = streamUrl;
-        video.load();
-      }
-    }
-
-    dlBtn.addEventListener('click', async function() {
-      const isHls = currentFmt === 'hls';
-      if (isHls) {
-        window.open(currentDlUrl, '_blank');
-        return;
-      }
-      dlBtn.textContent = 'Preparing...';
-      dlBtn.disabled = true;
-      try {
-        const resp = await fetch(currentDlUrl);
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const blob = await resp.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = blobUrl;
-        const cd = resp.headers.get('Content-Disposition') || '';
-        const match = cd.match(/filename[*]?=["']?([^"';\\n]+)/i);
-        a.download = match ? match[1].trim() : 'video.mp4';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
-      } catch (e) {
-        window.open(currentDlUrl, '_blank');
-      } finally {
-        dlBtn.textContent = '↓ Download';
-        dlBtn.disabled = false;
-      }
-    });
-    const first = sel.options[sel.selectedIndex];
-    loadSrc(first.value, first.dataset.fmt, first.dataset.dl);
-
-    sel.addEventListener('change', function() {
-      const opt = this.options[this.selectedIndex];
-      loadSrc(opt.value, opt.dataset.fmt, opt.dataset.dl);
-    });
-  </script>
-</body>
-</html>`;
-
-    return new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
-  } catch (err) {
-    return errorPage(String(err));
-  }
+function escHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;").replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function rewriteToWorker(proxyUrl, workerOrigin) {
   if (!proxyUrl) return proxyUrl;
   try {
     const u = new URL(proxyUrl);
-    u.protocol = new URL(workerOrigin).protocol;
-    u.host     = new URL(workerOrigin).host;
+    const w = new URL(workerOrigin);
+    u.protocol = w.protocol;
+    u.host     = w.host;
     return u.toString();
-  } catch {
-    return proxyUrl;
-  }
-}
-
-function escHtml(str) {
-  return String(str || "")
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  } catch { return proxyUrl; }
 }
 
 function errorPage(msg) {
@@ -261,35 +101,179 @@ function errorPage(msg) {
 }
 
 // ---------------------------------------------------------------------------
-// Main handler
+// proxyToRender — forward POST to API with cold-start retry
 // ---------------------------------------------------------------------------
 
-async function handleRequest(request, apiKey) {
+async function proxyToApi(request, apiKey, apiBase) {
+  const url     = new URL(request.url);
+  const body    = await request.text();
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) headers["X-API-Key"] = apiKey;
+
+  const MAX_ATTEMPTS = 3;
+  const RETRY_DELAY  = 5000;
+  let lastResp;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      const resp = await fetch(`${apiBase}${url.pathname}${url.search}`, {
+        method: request.method, headers, body: body || undefined,
+      });
+      if (resp.ok || (resp.status >= 400 && resp.status < 500)) {
+        const data = await resp.json().catch(() => ({}));
+        return new Response(JSON.stringify(data), {
+          status: resp.status,
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        });
+      }
+      lastResp = resp;
+    } catch (err) {
+      if (attempt < MAX_ATTEMPTS - 1) {
+        await new Promise(r => setTimeout(r, RETRY_DELAY));
+        continue;
+      }
+      return new Response(
+        JSON.stringify({ status: "error", message: `API unreachable: ${err.message}` }),
+        { status: 502, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (attempt < MAX_ATTEMPTS - 1) await new Promise(r => setTimeout(r, RETRY_DELAY));
+  }
+  return new Response(
+    JSON.stringify({ status: "error", message: `API returned HTTP ${lastResp?.status}` }),
+    { status: lastResp?.status || 502, headers: { "Content-Type": "application/json" } },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Watch page — fetch qualities from API and serve HLS.js player
+// ---------------------------------------------------------------------------
+
+async function serveWatchPage(viewkey, workerOrigin, apiKey, apiBase) {
+  try {
+    const apiHeaders = { "Content-Type": "application/json" };
+    if (apiKey) apiHeaders["X-API-Key"] = apiKey;
+
+    const r = await fetch(`${apiBase}/ph/download`, {
+      method: "POST", headers: apiHeaders,
+      body: JSON.stringify({ url: `https://www.pornhub.com/view_video.php?viewkey=${viewkey}` }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ message: `HTTP ${r.status}` }));
+      return errorPage(err.message || `API returned ${r.status}`);
+    }
+    const { data } = await r.json();
+    const title     = data.title     || "Video";
+    const thumbnail = data.thumbnail || "";
+    const duration  = data.duration  || "";
+    const qualities = data.qualities || [];
+    if (!qualities.length) return errorPage("No streams found.");
+
+    const opts = qualities.map(q => ({
+      label: `${q.quality}p ${q.format.toUpperCase()}`,
+      fmt:   q.format,
+      proxy: rewriteToWorker(q.proxy_url,    workerOrigin),
+      dl:    rewriteToWorker(q.download_url, workerOrigin),
+    }));
+
+    const optionsHtml = opts.map(o =>
+      `<option value="${escHtml(o.proxy)}" data-fmt="${o.fmt}" data-dl="${escHtml(o.dl)}">${escHtml(o.label)}</option>`
+    ).join("\n");
+    const best = opts[0];
+
+    const html = `<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>${escHtml(title)}</title>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0f0f0f;color:#eee;font-family:system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:24px 16px 48px}
+    .container{width:100%;max-width:960px}
+    h1{font-size:1.15rem;font-weight:600;margin-bottom:14px;color:#fff}
+    .player-wrap{width:100%;background:#000;border-radius:8px;overflow:hidden}
+    video{width:100%;display:block;max-height:540px;background:#000}
+    .controls{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}
+    select{background:#1e1e1e;color:#eee;border:1px solid #444;border-radius:6px;padding:8px 12px;font-size:.9rem;cursor:pointer;flex:1;min-width:120px}
+    .btn{display:inline-flex;align-items:center;gap:6px;font-weight:700;font-size:.9rem;padding:9px 18px;border-radius:6px;white-space:nowrap;transition:background .15s;cursor:pointer;border:none}
+    .btn-dl{background:#f90;color:#000}.btn-dl:hover{background:#e88600}.btn-dl:disabled{background:#666;cursor:not-allowed}
+    .meta{margin-top:10px;font-size:.8rem;color:#666}a{color:#f90}
+  </style>
+</head><body>
+  <div class="container">
+    <h1>${escHtml(title)}</h1>
+    <div class="player-wrap"><video id="player" controls preload="metadata" poster="${escHtml(thumbnail)}">Your browser does not support HTML5 video.</video></div>
+    <div class="controls">
+      <select id="qualitySelect">${optionsHtml}</select>
+      <button id="dlBtn" class="btn btn-dl">&#8595; Download</button>
+    </div>
+    <div class="meta">${duration ? `Duration: ${escHtml(duration)} &nbsp;&middot;&nbsp; ` : ""}Powered by <a href="https://github.com/MeherMankar/grabx-api" target="_blank">GrabX API</a></div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+  <script>
+    const video=document.getElementById('player'),sel=document.getElementById('qualitySelect'),dlBtn=document.getElementById('dlBtn');
+    let hls=null,currentDlUrl='${escHtml(best.dl)}',currentFmt='${best.fmt}';
+    function loadSrc(u,fmt,dl){
+      currentDlUrl=dl;currentFmt=fmt;
+      if(hls){hls.destroy();hls=null;}
+      if(fmt==='hls'||u.includes('.m3u8')){
+        if(Hls.isSupported()){hls=new Hls({enableWorker:true});hls.loadSource(u);hls.attachMedia(video);hls.on(Hls.Events.MANIFEST_PARSED,()=>video.play().catch(()=>{}));}
+        else if(video.canPlayType('application/vnd.apple.mpegurl')){video.src=u;video.play().catch(()=>{});}
+      }else{video.src=u;video.load();}
+    }
+    dlBtn.addEventListener('click',async function(){
+      if(currentFmt==='hls'){window.open(currentDlUrl,'_blank');return;}
+      dlBtn.textContent='Preparing...';dlBtn.disabled=true;
+      try{
+        const resp=await fetch(currentDlUrl);if(!resp.ok)throw new Error('HTTP '+resp.status);
+        const blob=await resp.blob(),blobUrl=URL.createObjectURL(blob),a=document.createElement('a');
+        a.href=blobUrl;const cd=resp.headers.get('Content-Disposition')||'';
+        const m=cd.match(/filename[*]?=["']?([^"';\n]+)/i);a.download=m?m[1].trim():'video.mp4';
+        document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(()=>URL.revokeObjectURL(blobUrl),10000);
+      }catch(e){window.open(currentDlUrl,'_blank');}
+      finally{dlBtn.textContent='↓ Download';dlBtn.disabled=false;}
+    });
+    const first=sel.options[sel.selectedIndex];loadSrc(first.value,first.dataset.fmt,first.dataset.dl);
+    sel.addEventListener('change',function(){const o=this.options[this.selectedIndex];loadSrc(o.value,o.dataset.fmt,o.dataset.dl);});
+  </script>
+</body></html>`;
+    return new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+  } catch (err) { return errorPage(String(err)); }
+}
+
+// ---------------------------------------------------------------------------
+// Main request handler
+// ---------------------------------------------------------------------------
+
+async function handleRequest(request, apiKey, apiBase) {
   const url  = new URL(request.url);
   const path = url.pathname;
 
-  // Routes that proxy back to Render API (with cold-start retry)
-  const RENDER_PROXY_PATHS = ["/xv/download", "/xnxx/download", "/xh/download"];
-  if (RENDER_PROXY_PATHS.includes(path) && request.method === "POST") {
-    return await proxyToRender(request, apiKey);
+  // POST endpoints — proxy to API with retry
+  const API_POST_PATHS = ["/download", "/ph/download", "/xv/download", "/xnxx/download", "/xh/download", "/jav/download"];
+  if (API_POST_PATHS.includes(path) && request.method === "POST") {
+    return await proxyToApi(request, apiKey, apiBase);
   }
 
-  const PROXY_PATHS = ["/ph/proxy", "/proxy", "/jav/proxy"];
-  // /adult/proxy must go through Render — XHamster/Xvideos/XNXX CDN URLs
-  // embed the requesting IP (data=<IP>). CF Worker edge IPs differ from
-  // Render's, causing 403. Redirect to Render for all adult CDN proxying.
-  if (path === "/adult/proxy") {
-    return Response.redirect(`${RENDER_BASE}${url.pathname}${url.search}`, 302);
+  // Watch pages — redirect to API
+  const API_WATCH_PATHS = ["/xv/watch", "/xnxx/watch", "/xh/watch", "/jav/watch"];
+  if (API_WATCH_PATHS.includes(path)) {
+    return Response.redirect(`${apiBase}${path}${url.search}`, 302);
   }
 
-  if (!PROXY_PATHS.includes(path)) {
-    // /ph/watch/<viewkey> — serve player from Worker
-    if (path.startsWith("/ph/watch/")) {
-      const viewkeyWatch = path.replace("/ph/watch/", "").split("?")[0];
-      if (viewkeyWatch) {
-        return await serveWatchPage(viewkeyWatch, url.origin, apiKey);
-      }
-    }
+  // PH watch page — served by Worker itself
+  if (path.startsWith("/ph/watch/")) {
+    const vk = path.replace("/ph/watch/", "").split("?")[0];
+    if (vk) return await serveWatchPage(vk, url.origin, apiKey, apiBase);
+  }
+
+  // Adult/Terabox proxies — redirect to API (IP-locked CDN)
+  if (path === "/adult/proxy" || path === "/proxy") {
+    return Response.redirect(`${apiBase}${path}${url.search}`, 302);
+  }
+
+  // Proxy paths handled by Worker
+  const WORKER_PROXY_PATHS = ["/ph/proxy", "/jav/proxy"];
+  if (!WORKER_PROXY_PATHS.includes(path)) {
     return new Response(JSON.stringify({ status: "error", message: "Not found" }),
       { status: 404, headers: { "Content-Type": "application/json" } });
   }
@@ -306,7 +290,6 @@ async function handleRequest(request, apiKey) {
       { status: 400, headers: { "Content-Type": "application/json" } });
   }
 
-  // Auth
   if (apiKey) {
     const valid = await verifyToken(cdnUrl, tokenB64, expiryStr, apiKey);
     if (!valid) {
@@ -317,120 +300,63 @@ async function handleRequest(request, apiKey) {
 
   const isM3u8 = cdnUrl.includes(".m3u8");
   const isTs   = cdnUrl.endsWith(".ts") || cdnUrl.includes(".ts?");
+  const isPH   = path === "/ph/proxy";
+  const isJav  = path === "/jav/proxy";
 
-  // Browser opening m3u8 → redirect to watch page on Render
-  if (isM3u8 && viewkey && path === "/ph/proxy") {
+  // Browser opening m3u8 → redirect to watch page
+  if (isM3u8 && viewkey && isPH) {
     const accept = request.headers.get("Accept") || "";
     if (accept.includes("text/html") && !accept.includes("application/x-mpegurl")) {
-      return Response.redirect(`${RENDER_BASE}/ph/watch/${viewkey}`, 302);
+      return Response.redirect(`${url.origin}/ph/watch/${viewkey}`, 302);
     }
   }
 
-  const isPH      = path === "/ph/proxy";
-  const isTerabox = path === "/proxy";
-  const isAdult   = path === "/adult/proxy";
-  const isJav     = path === "/jav/proxy";
-
-  // Terabox (/proxy): ndus cookie is IP-bound to Render's server IP.
-  if (isTerabox) {
-    return Response.redirect(`${RENDER_BASE}${url.pathname}${url.search}`, 302);
-  }
-
-  // JAVtiful (/jav/proxy): plain fetch with Referer — no special TLS needed
+  // JAV proxy — plain fetch
   if (isJav) {
-    const javHeaders = new Headers({
-      "Referer":         "https://javtiful.com/",
-      "Origin":          "https://javtiful.com",
-      "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Accept":          "*/*",
-      "Accept-Encoding": "identity",
+    const h = new Headers({
+      "Referer": "https://javtiful.com/", "Origin": "https://javtiful.com",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+      "Accept": "*/*", "Accept-Encoding": "identity",
     });
-    const rng = request.headers.get("Range");
-    if (rng) javHeaders.set("Range", rng);
-
-    const javResp = await fetch(cdnUrl, { method: "GET", headers: javHeaders, redirect: "follow" });
-    if (!javResp.ok) {
-      return new Response(JSON.stringify({ status: "error", message: `CDN returned HTTP ${javResp.status}.` }),
-        { status: javResp.status, headers: { "Content-Type": "application/json" } });
-    }
-    const pathPart = new URL(cdnUrl).pathname;
-    const fname    = pathPart.split("/").pop() || "video.mp4";
-    const safeF    = fname.endsWith(".mp4") ? fname : fname + ".mp4";
-    const disp     = downloadMode ? `attachment; filename="${safeF}"` : `inline; filename="${safeF}"`;
+    if (request.headers.get("Range")) h.set("Range", request.headers.get("Range"));
+    const resp = await fetch(cdnUrl, { method: "GET", headers: h, redirect: "follow" });
+    if (!resp.ok) return new Response(JSON.stringify({ status: "error", message: `CDN ${resp.status}` }),
+      { status: resp.status, headers: { "Content-Type": "application/json" } });
+    const fname = (new URL(cdnUrl).pathname.split("/").pop() || "video.mp4").replace(/\?.*/, "");
     const rh = new Headers({
-      "Content-Type":                javResp.headers.get("Content-Type") || "video/mp4",
-      "Content-Disposition":         disp,
-      "Accept-Ranges":               "bytes",
-      "Access-Control-Allow-Origin": "*",
-      "Cache-Control":               "no-store",
+      "Content-Type": resp.headers.get("Content-Type") || "video/mp4",
+      "Content-Disposition": downloadMode ? `attachment; filename="${fname}"` : `inline; filename="${fname}"`,
+      "Accept-Ranges": "bytes", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store",
     });
-    for (const h of ["Content-Length", "Content-Range", "ETag"]) {
-      const v = javResp.headers.get(h); if (v) rh.set(h, v);
+    for (const h2 of ["Content-Length", "Content-Range", "ETag"]) {
+      const v = resp.headers.get(h2); if (v) rh.set(h2, v);
     }
-    return new Response(javResp.body, { status: javResp.status, headers: rh });
+    return new Response(resp.body, { status: resp.status, headers: rh });
   }
 
-  // Derive correct Referer/Origin for CDN requests
-  let referer, originH;
-  if (isPH) {
-    referer = "https://www.pornhub.com/";
-    originH = "https://www.pornhub.com";
-  } else if (isAdult) {
-    // Auto-detect from CDN hostname
-    const cdnHost = (() => { try { return new URL(cdnUrl).hostname; } catch { return ""; } })();
-    if (/xnxx-cdn\.com/i.test(cdnHost)) {
-      referer = "https://www.xnxx.com/";
-      originH = "https://www.xnxx.com";
-    } else if (/xhmscdn|xhstorage|xhamster/i.test(cdnHost)) {
-      referer = "https://xhamster.com/";
-      originH = "https://xhamster.com";
-    } else {
-      // Default to Xvideos
-      referer = "https://www.xvideos.com/";
-      originH = "https://www.xvideos.com";
-    }
-  }
-
+  // PH proxy
   const cdHeaders = new Headers({
-    "Referer":        referer,
-    "Origin":         originH,
-    "User-Agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept":         "*/*",
-    "Accept-Encoding": "identity",
+    "Referer": "https://www.pornhub.com/", "Origin": "https://www.pornhub.com",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+    "Accept": "*/*", "Accept-Encoding": "identity",
+    "Cookie": "accessAgeDisclaimerPH=1; accessAgeDisclaimerUK=1; accessPH=1; age_verified=1; platform=pc",
   });
-
-  const rangeHeader = request.headers.get("Range");
-  if (rangeHeader) cdHeaders.set("Range", rangeHeader);
-
-  if (isPH) {
-    cdHeaders.set("Cookie", "accessAgeDisclaimerPH=1; accessAgeDisclaimerUK=1; accessPH=1; age_verified=1; platform=pc");
-  }
-  if (isAdult) {
-    const cdnHost = (() => { try { return new URL(cdnUrl).hostname; } catch { return ""; } })();
-    if (/xhmscdn|xhstorage|xhamster/i.test(cdnHost)) {
-      cdHeaders.set("Cookie", "adc_ga_v2=1; is_adult_confirmed=1; xhamster-language=en; platform=desktop");
-    }
-  }
+  if (request.headers.get("Range")) cdHeaders.set("Range", request.headers.get("Range"));
 
   const cdnResp = await fetch(cdnUrl, { method: "GET", headers: cdHeaders, redirect: "follow" });
 
-  // HLS manifest rewriting
   if (isM3u8 && cdnResp.ok) {
     const text = await cdnResp.text();
     if (!text || text.trim().length < 10) {
       return new Response(JSON.stringify({ status: "error", message: "CDN returned empty manifest." }),
         { status: 502, headers: { "Content-Type": "application/json" } });
     }
-    const extraParams = { _t: tokenB64, _e: expiryStr, vk: viewkey, q: quality };
-    const rewritten   = rewriteManifest(text, cdnUrl, url.origin, extraParams);
+    const rewritten = rewriteManifest(text, cdnUrl, url.origin, { _t: tokenB64, _e: expiryStr, vk: viewkey, q: quality });
     return new Response(rewritten, {
       status: 200,
-      headers: {
-        "Content-Type":                "application/vnd.apple.mpegurl; charset=utf-8",
-        "Access-Control-Allow-Origin": "*",
-        "Cache-Control":               "no-cache",
-        "Content-Disposition":         "inline; filename=\"playlist.m3u8\"",
-      },
+      headers: { "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
+                 "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache",
+                 "Content-Disposition": 'inline; filename="playlist.m3u8"' },
     });
   }
 
@@ -439,107 +365,34 @@ async function handleRequest(request, apiKey) {
       { status: cdnResp.status, headers: { "Content-Type": "application/json" } });
   }
 
-  // Stream bytes
-  const pathPart = new URL(cdnUrl).pathname;
-  const fname    = pathPart.split("/").pop().split("?")[0] || "video";
-  const safeF    = /\.(mp4|webm|ts|m3u8)$/i.test(fname) ? fname : fname + ".mp4";
-  const ct       = cdnResp.headers.get("Content-Type") || (isTs ? "video/mp2t" : "video/mp4");
-  const disp     = downloadMode ? `attachment; filename="${safeF}"` : `inline; filename="${safeF}"`;
-
-  const respHeaders = new Headers({
-    "Content-Type":                ct,
-    "Content-Disposition":         disp,
-    "Accept-Ranges":               "bytes",
-    "Access-Control-Allow-Origin": "*",
-    "Cache-Control":               "no-store",
+  const fname2 = (new URL(cdnUrl).pathname.split("/").pop().split("?")[0] || "video");
+  const safeF  = /\.(mp4|webm|ts|m3u8)$/i.test(fname2) ? fname2 : fname2 + ".mp4";
+  const ct     = cdnResp.headers.get("Content-Type") || (isTs ? "video/mp2t" : "video/mp4");
+  const rh2    = new Headers({
+    "Content-Type": ct,
+    "Content-Disposition": downloadMode ? `attachment; filename="${safeF}"` : `inline; filename="${safeF}"`,
+    "Accept-Ranges": "bytes", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store",
   });
   for (const h of ["Content-Length", "Content-Range", "ETag", "Last-Modified"]) {
-    const v = cdnResp.headers.get(h);
-    if (v) respHeaders.set(h, v);
+    const v = cdnResp.headers.get(h); if (v) rh2.set(h, v);
   }
-
-  return new Response(cdnResp.body, { status: cdnResp.status, headers: respHeaders });
+  return new Response(cdnResp.body, { status: cdnResp.status, headers: rh2 });
 }
 
 // ---------------------------------------------------------------------------
-// proxyToRender — forward a request to Render, retrying through cold start
+// Entry point
 // ---------------------------------------------------------------------------
-
-async function proxyToRender(request, apiKey) {
-  const url     = new URL(request.url);
-  const body    = await request.text();
-  const headers = {
-    "Content-Type": "application/json",
-  };
-  if (apiKey) headers["X-API-Key"] = apiKey;
-
-  // Ping Render first to trigger wake-up, then retry the actual request.
-  // CF Workers can wait up to 30s per subrequest — enough for a cold start.
-  const MAX_ATTEMPTS = 3;
-  const RETRY_DELAY  = 5000; // ms between retries
-
-  let lastResp;
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    try {
-      const resp = await fetch(`${RENDER_BASE}${url.pathname}${url.search}`, {
-        method:  request.method,
-        headers: headers,
-        body:    body || undefined,
-      });
-
-      // Success or a real error (not a timeout/network error)
-      if (resp.ok || (resp.status >= 400 && resp.status < 500)) {
-        const data = await resp.json().catch(() => ({}));
-        return new Response(JSON.stringify(data), {
-          status:  resp.status,
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-        });
-      }
-
-      lastResp = resp;
-    } catch (err) {
-      // Network error (Render cold start / connection refused) — wait and retry
-      if (attempt < MAX_ATTEMPTS - 1) {
-        await new Promise(r => setTimeout(r, RETRY_DELAY));
-        continue;
-      }
-      return new Response(
-        JSON.stringify({ status: "error", message: `Render unreachable after ${MAX_ATTEMPTS} attempts: ${err.message}` }),
-        { status: 502, headers: { "Content-Type": "application/json" } },
-      );
-    }
-
-    if (attempt < MAX_ATTEMPTS - 1) {
-      await new Promise(r => setTimeout(r, RETRY_DELAY));
-    }
-  }
-
-  return new Response(
-    JSON.stringify({ status: "error", message: `Render returned HTTP ${lastResp?.status}` }),
-    { status: lastResp?.status || 502, headers: { "Content-Type": "application/json" } },
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Entry point — everything inside try/catch
-// ---------------------------------------------------------------------------
-// API_BASE_URL: set this as a Worker secret to point to your deployment.
-// Supports Koyeb, Render, Railway, or any other host.
-// Default falls back to Render.
-// Set via: npx wrangler secret put API_BASE_URL
-// ---------------------------------------------------------------------------
-
-let RENDER_BASE = "https://grabx-api.onrender.com"; // overridden in fetch() from env
 
 export default {
   async fetch(request, env, ctx) {
     try {
-      const apiKey = (env && env.API_KEY) ? String(env.API_KEY) : "";
-      globalThis.TERABOX_COOKIE = (env && env.TERABOX_COOKIE) ? String(env.TERABOX_COOKIE) : "";
-      // API_BASE_URL lets you point the Worker at Koyeb, Railway, or any host
-      if (env && env.API_BASE_URL) {
-        RENDER_BASE = String(env.API_BASE_URL).replace(/\/$/, "");
-      }
+      // API_BASE_URL is REQUIRED — set it in CF dashboard (Variable or Secret)
+      // to point to your deployment: Koyeb, Render, Railway, etc.
+      const apiBase = env?.API_BASE_URL
+        ? String(env.API_BASE_URL).replace(/\/$/, "")
+        : null;
+
+      const apiKey = env?.API_KEY ? String(env.API_KEY) : "";
       const url    = new URL(request.url);
 
       // CORS preflight
@@ -554,36 +407,28 @@ export default {
         });
       }
 
-      // Health check
+      // Health check — always works, shows config status
       if (url.pathname === "/") {
         return new Response(JSON.stringify({
           status:   "ok",
           service:  "grabx-proxy worker",
-          auth:     apiKey ? "enabled" : "disabled (API_KEY not set)",
-          api_base: RENDER_BASE,
+          auth:     apiKey ? "enabled" : "disabled",
+          api_base: apiBase || "NOT SET — add API_BASE_URL variable in CF dashboard",
         }), { headers: { "Content-Type": "application/json" } });
       }
 
-      // ---------------------------------------------------------------------------
-      // Proxy all download endpoints to Render with wake-up retry.
-      // Worker has no timeout so it absorbs Render's 30s cold start.
-      // ---------------------------------------------------------------------------
-      const RENDER_POST_PATHS = ["/download", "/ph/download", "/xv/download", "/xnxx/download", "/xh/download", "/jav/download"];
-      if (RENDER_POST_PATHS.includes(url.pathname) && request.method === "POST") {
-        return await proxyToRender(request, apiKey);
+      if (!apiBase) {
+        return new Response(JSON.stringify({
+          status:  "error",
+          message: "API_BASE_URL is not configured. Add it as a Variable in the CF Worker settings.",
+        }), { status: 503, headers: { "Content-Type": "application/json" } });
       }
 
-      // Watch pages that live on Render — redirect there
-      const RENDER_WATCH_PATHS_ALL = ["/xv/watch", "/xnxx/watch", "/xh/watch", "/jav/watch"];
-      if (RENDER_WATCH_PATHS_ALL.includes(url.pathname)) {
-        return Response.redirect(`${RENDER_BASE}${url.pathname}${url.search}`, 302);
-      }
-
-      if (request.method !== "GET" && request.method !== "HEAD") {
+      if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "POST") {
         return new Response("Method not allowed", { status: 405 });
       }
 
-      return await handleRequest(request, apiKey);
+      return await handleRequest(request, apiKey, apiBase);
 
     } catch (err) {
       console.error("Worker exception:", err);
