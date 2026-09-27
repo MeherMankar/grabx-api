@@ -190,7 +190,9 @@ def render_watch_page(meta: dict, qualities: list):
     )
 
     best     = sorted_opts[0]
-    best_dl  = html_attr(best.get("download_url", ""))
+    # html_attr escapes & as &amp; which is wrong for inline JS strings
+    # Use unicode escape so & stays literal in JS
+    best_dl  = best.get("download_url", "").replace("&", r"\u0026")
     best_fmt = best.get("format", "mp4")
 
     html = f"""<!DOCTYPE html>

@@ -180,6 +180,9 @@ async function serveWatchPage(viewkey, workerOrigin, apiKey, apiBase) {
       `<option value="${escHtml(o.proxy)}" data-fmt="${o.fmt}" data-dl="${escHtml(o.dl)}">${escHtml(o.label)}</option>`
     ).join("\n");
     const best = opts[0];
+    // For inline JS strings, encode & as \u0026 to avoid HTML interpretation issues
+    const bestDlJs    = best.dl.replace(/&/g, "\\u0026");
+    const bestProxyJs = best.proxy.replace(/&/g, "\\u0026");
 
     const html = `<!DOCTYPE html>
 <html lang="en"><head>
@@ -211,10 +214,9 @@ async function serveWatchPage(viewkey, workerOrigin, apiKey, apiBase) {
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <script>
     const video=document.getElementById('player'),sel=document.getElementById('qualitySelect'),dlBtn=document.getElementById('dlBtn');
-    let hls=null,currentDlUrl='${escHtml(best.dl)}',currentFmt='${best.fmt}';
+    let hls=null,currentDlUrl='${bestDlJs}',currentFmt='${best.fmt}';
     function loadSrc(u,fmt,dl){
-      currentDlUrl=dl;currentFmt=fmt;
-      if(hls){hls.destroy();hls=null;}
+      currentDlUrl=dl;currentFmt=fmt;       if(hls){hls.destroy();hls=null;}
       if(fmt==='hls'||u.includes('.m3u8')){
         if(Hls.isSupported()){hls=new Hls({enableWorker:true});hls.loadSource(u);hls.attachMedia(video);hls.on(Hls.Events.MANIFEST_PARSED,()=>video.play().catch(()=>{}));}
         else if(video.canPlayType('application/vnd.apple.mpegurl')){video.src=u;video.play().catch(()=>{});}
