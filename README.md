@@ -7,7 +7,7 @@
 A self-hosted Flask API that extracts direct download/stream links from multiple video platforms — no third-party services, deployable on Render in minutes.
 
 **Maintained by:** [MeherMankar](https://github.com/MeherMankar) · [Telegram](https://t.me/MeherPatil)  
-**Base project by:** [genxnano](https://t.me/genxnano)
+**Terabox base by:** [genxnano](https://t.me/genxnano)
 
 ---
 
@@ -279,6 +279,6 @@ All variants of: `terabox.com` · `1024terabox.com` · `teraboxapp.com` · `neph
 | Role | Credit |
 |------|--------|
 | Maintainer | [MeherMankar](https://github.com/MeherMankar) · [Telegram](https://t.me/MeherPatil) |
-| Base project | [genxnano](https://t.me/genxnano) |
+| Terabox base | [genxnano](https://t.me/genxnano) |
 | WAP bypass | [FZBypassBot](https://github.com/rjriajul/FZBypassBot) |
 | XHamster decryption | [yt-dlp XHamster extractor](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/extractor/xhamster.py) |

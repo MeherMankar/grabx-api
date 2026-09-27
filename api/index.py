@@ -97,7 +97,7 @@ def home():
     return jsonify({
         "status":       "active",
         "message":      "GrabX API",
-        "creator":      "Maintained by MeherMankar (t.me/MeherPatil) | Base by genxnano (t.me/genxnano)",
+        "creator":      "Maintained by MeherMankar (t.me/MeherPatil) | Terabox base by genxnano (t.me/genxnano)",
         "github":       "https://github.com/MeherMankar/grabx-api",
         "accounts_configured": get_account_count(),
         "auth":         "enabled (X-API-Key required)" if API_KEY else "disabled (open access)",
