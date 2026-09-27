@@ -1,209 +1,402 @@
-# Terabox + PornHub Downloader API Documentation
+# GrabX API — Documentation
 
-## Overview
+**Base URL:** `https://grabx-api.onrender.com`  
+**GitHub:** [MeherMankar/grabx-api](https://github.com/MeherMankar/grabx-api)
 
-A Flask-based API that provides two services:
+---
 
-1. **Terabox** — bypasses the CAPTCHA gate using the WAP page trick to return direct download links and file metadata.
-2. **PornHub** — scrapes a video watch page to extract all available quality streams (MP4 and HLS) without requiring an account.
+## Quick Start
+
+```bash
+# 1. Call any download endpoint with your API key
+curl -X POST https://grabx-api.onrender.com/ph/download \
+  -H "X-API-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://www.pornhub.com/view_video.php?viewkey=abc123"}'
+
+# 2. Open watch_url in a browser — no key needed
+# 3. Use best_proxy_url / proxy_url fields to stream/download — no key needed (signed)
+```
+
+---
+
+## Authentication
+
+Set `API_KEY` (or `GRABX_API_KEY`) as an environment variable to protect the API.  
+Leave unset for open/public access.
+
+### Passing the key
+
+| Method | Example |
+|--------|---------|
+| Header | `X-API-Key: your_key` |
+| Header | `Authorization: Bearer your_key` |
+| Query  | `?api_key=your_key` |
+
+### Public routes (never need a key)
+
+| Route | Description |
+|-------|-------------|
+| `GET /` | API info |
+| `GET /health` | Health check |
+| `GET /docs` | This documentation |
+| `GET /ph/watch/<viewkey>` | PH video player |
+| `GET /xv/watch?url=` | Xvideos player |
+| `GET /xnxx/watch?url=` | XNXX player |
+| `GET /xh/watch?url=` | XHamster player |
+| `GET /jav/watch?url=` | JAVtiful player |
+| All `/proxy`, `/ph/proxy`, `/adult/proxy`, `/jav/proxy` | CDN proxies (token-auth, see below) |
+
+### Signed proxy tokens
+
+When you call a download endpoint with your key, **all returned proxy/stream URLs are pre-signed** with a short-lived HMAC token. Anyone holding those URLs can stream/download without a key — no key leakage in browser URLs.
+
+Token TTL: **24 hours** (configurable via `PROXY_TOKEN_TTL_HOURS`).
 
 ---
 
 ## Endpoints
 
 ### `GET /`
-
-Returns API status and a summary of all available endpoints.
-
-**Response:**
-```json
-{
-  "status": "active",
-  "message": "Terabox + PornHub Downloader API",
-  "creator": "...",
-  "accounts_configured": 2,
-  "endpoints": { "...": "..." }
-}
-```
+API info — lists all endpoints, auth mode, proxy backend, Terabox account count.
 
 ---
 
+### `GET /health`
+Health check. Returns Python version, platform, auth status, proxy backend.
+
+---
+
+## Terabox
+
 ### `POST /download`
+Extract direct download links from any Terabox share URL.  
+Supports all Terabox mirror domains, recursive folder traversal, and video quality metadata.
 
-Get direct download link(s) for a Terabox share URL.
-
-**Request Body:**
+**Request**
 ```json
-{
-  "url": "https://www.terabox.com/s/1AbCdEfGhIjK"
-}
+{ "url": "https://1024terabox.com/s/YOUR_SHARE_ID" }
 ```
 
-**Response (success):**
+**Response**
 ```json
 {
   "status": "success",
   "data": {
     "title": "video.mp4",
+    "total_files": 1,
+    "download_available": true,
     "files": [
       {
         "filename": "video.mp4",
-        "size_bytes": 104857600,
-        "size": "100.00 MB",
+        "folder": "/MyFolder",
+        "size": "1.05 GB",
+        "size_bytes": 1127428915,
         "thumbnail": "https://...",
-        "dlink": "https://...",
-        "proxy_url": "https://your-api/proxy?url=...",
-        "fs_id": "123456789"
+        "dlink": "https://d.terabox.com/...",
+        "proxy_url": "https://grabx-api.onrender.com/proxy?url=...&_t=...&_e=...",
+        "fs_id": "123456789",
+        "video_quality": {
+          "resolution": "1920x1080", "label": "1080p",
+          "duration": "12:34", "fps": 30.0, "bitrate_kbps": 4200.0
+        }
       }
-    ],
-    "download_available": true,
-    "note": "Use 'dlink' with a download manager (needs Terabox ndus cookie), or use 'proxy_url' to stream through this server."
+    ]
   }
 }
 ```
 
-**Response (error):**
-```json
-{
-  "status": "error",
-  "message": "Cannot extract surl from URL: ..."
-}
-```
+> `proxy_url` streams the file through the server (cookie attached).  
+> `dlink` is the raw CDN link — requires `ndus` cookie in the browser.  
+> `video_quality` is only present on video files where Terabox exposes metadata.
 
-**Notes:**
-- Requires `TERABOX_COOKIE` environment variable containing one or more `ndus` values.
-- Single account: `ndus=YOUR_VALUE`
-- Multiple accounts: `ndus=VALUE1,ndus=VALUE2`
+**Supported domains:** terabox.com, 1024terabox.com, nephobox.com, 4funbox.co, mirrobox.com, momerybox.com, tibibox.com, dubox.com, freeterabox.com, and all their variants.
 
 ---
 
-### `GET /proxy`
+### `GET /proxy?url=<encoded_dlink>`
+Stream/download a Terabox file through the server.  
+The `ndus` cookie is attached automatically — no Terabox account needed on the client.
 
-Proxy-stream a Terabox `dlink` through this server. Useful when the client cannot set the required Terabox cookies directly.
-
-**Query Parameters:**
-
-| Param | Required | Description              |
-|-------|----------|--------------------------|
-| `url` | Yes      | URL-encoded Terabox dlink |
-
-**Example:**
-```
-GET /proxy?url=https%3A%2F%2Fd.terabox.com%2F...
-```
-
-**Response:** Binary file stream with `Content-Disposition: attachment` header.
+> Use `proxy_url` from `/download` response — it already includes the signed token.
 
 ---
+
+## PornHub
 
 ### `POST /ph/download`
+Extract stream/download links from a PornHub video.
 
-Extract all available video stream/download links from a PornHub watch page.
-
-**Request Body:**
+**Request**
 ```json
-{
-  "url": "https://www.pornhub.com/view_video.php?viewkey=ph..."
-}
+{ "url": "https://www.pornhub.com/view_video.php?viewkey=6a165f5d3a96c" }
 ```
 
-Supported URL formats:
-- `https://www.pornhub.com/view_video.php?viewkey=ph...`
-- Regional subdomains: `de.pornhub.com`, `fr.pornhub.com`, etc.
-- Thumbzilla: `https://www.thumbzilla.com/video/ph.../...`
-
-**Response (success):**
+**Response**
 ```json
 {
   "status": "success",
   "data": {
     "title": "Video Title",
     "thumbnail": "https://...",
-    "duration": "12:34",
-    "duration_seconds": 754,
-    "viewkey": "ph1234567890",
+    "duration": "7:18",
+    "duration_seconds": 438,
+    "viewkey": "6a165f5d3a96c",
+    "watch_url": "https://grabx-api.onrender.com/ph/watch/6a165f5d3a96c",
+    "best_format": "mp4",
     "qualities": [
-      { "quality": "1080", "url": "https://...1080P....mp4", "format": "mp4" },
-      { "quality": "720",  "url": "https://...720P....mp4",  "format": "mp4" },
-      { "quality": "480",  "url": "https://...480P....mp4",  "format": "mp4" },
-      { "quality": "240",  "url": "https://...240P....mp4",  "format": "mp4" },
-      { "quality": "hls",  "url": "https://.../master.m3u8", "format": "hls" }
+      {
+        "quality": "1080", "format": "mp4",
+        "proxy_url": "https://grabx-api.onrender.com/ph/proxy?url=...&_t=...&_e=...&vk=...&q=1080",
+        "download_url": "https://grabx-api.onrender.com/ph/proxy?url=...&dl=1&_t=..."
+      }
     ],
-    "best_url": "https://...1080P....mp4",
-    "note": "Use 'best_url' for the highest quality MP4, or pick a specific quality from 'qualities'. HLS streams (.m3u8) require a player that supports HLS."
+    "best_proxy_url": "...",
+    "best_download_url": "..."
   }
 }
 ```
 
-**Response (error):**
-```json
-{
-  "status": "error",
-  "message": "Not a supported PornHub URL (host: 'example.com')."
-}
-```
-
-**Possible error conditions:**
-
-| HTTP | Reason |
-|------|--------|
-| 400  | Invalid or non-PH URL, age-gate hit, page structure changed |
-| 404  | No downloadable streams found (premium-only or private video) |
-| 502  | Network error reaching PornHub |
-
-**Notes:**
-- No account or cookies required for public videos — an age-gate bypass cookie is set automatically.
-- Premium/private videos require the user to be logged in and are not supported.
-- `qualities` are sorted best-first (highest resolution MP4 first, HLS last).
-- MP4 links can be used directly in `<video>` tags or download managers.
-- HLS `.m3u8` links require an HLS-capable player (e.g. VLC, hls.js).
+**Supported:** pornhub.com, pornhubpremium.com, pornhub.net, pornhub.org, all language subdomains (cn/de/fr/…), thumbzilla.com.
 
 ---
 
-### `GET /docs`
+### `GET /ph/watch/<viewkey>`
+Browser video player. Always public. HLS.js enabled for HLS streams.
 
-Returns this documentation in Markdown format.
+```
+https://grabx-api.onrender.com/ph/watch/6a165f5d3a96c
+```
+
+---
+
+### `GET /ph/proxy?url=<encoded>&_t=<token>&_e=<expiry>`
+Proxy PH CDN streams. MP4s stream through server; HLS manifests are rewritten so all segments go through this proxy too. Auto-refreshes expired CDN links using the embedded `vk=` viewkey.
+
+---
+
+## Xvideos
+
+### `POST /xv/download`
+Extract stream/download links from an Xvideos video.
+
+**Request**
+```json
+{ "url": "https://www.xvideos.com/video.abc123/..." }
+```
+
+**Response** — same shape as `/ph/download` with `qualities` array (360p MP4, 480p MP4, HLS variants).
+
+---
+
+### `GET /xv/watch?url=<video_url>`
+Browser video player. Always public.
+
+---
+
+## XNXX
+
+### `POST /xnxx/download`
+Extract stream/download links from an XNXX video.
+
+**Request**
+```json
+{ "url": "https://www.xnxx.com/video-abc123/..." }
+```
+
+Same response shape as Xvideos.
+
+---
+
+### `GET /xnxx/watch?url=<video_url>`
+Browser video player. Always public.
+
+---
+
+## XHamster
+
+### `POST /xh/download`
+Extract stream/download links from an XHamster video.
+
+**Request**
+```json
+{ "url": "https://xhamster.com/videos/video-slug-xhABCDEF" }
+```
+
+**Response** — up to 5 MP4 qualities (144p → 720p) + HLS.  
+XHamster encrypts source URLs; GrabX decrypts them using the PRNG algorithm from the XHamster player (matches yt-dlp's XHamster extractor). Returns error if XHamster updates their algorithm.
+
+**Supported domains:** xhamster.com, xhamster.desi, xhamster.one, xhamster.xxx, xhamster.net, and language subdomains.
+
+---
+
+### `GET /xh/watch?url=<video_url>`
+Browser video player. Always public.
+
+---
+
+## JAVtiful
+
+### `POST /jav/download`
+Extract stream/download links from a JAVtiful video.
+
+**Request**
+```json
+{ "url": "https://javtiful.com/video/113886/hmn-904-reducing-mosaic" }
+```
+
+**Response**
+```json
+{
+  "status": "success",
+  "data": {
+    "title": "HMN-904 ...",
+    "thumbnail": "https://...",
+    "duration": "1:58:22",
+    "duration_seconds": 7102,
+    "watch_url": "https://grabx-api.onrender.com/jav/watch?url=...",
+    "qualities": [
+      {
+        "quality": "720", "format": "mp4",
+        "proxy_url": "https://grabx-api.onrender.com/jav/proxy?url=...&_t=...&_e=...",
+        "download_url": "..."
+      }
+    ],
+    "best_proxy_url": "...",
+    "best_download_url": "..."
+  }
+}
+```
+
+---
+
+### `GET /jav/watch?url=<video_url>`
+Browser video player. Always public.
+
+---
+
+### `GET /jav/proxy?url=<encoded>`
+Streams JAVtiful CDN content (fast-stream.jav.si) with correct Referer.
+
+---
+
+## Adult CDN Proxy
+
+### `GET /adult/proxy?url=<encoded>`
+Unified CDN proxy for Xvideos, XNXX, and XHamster streams.  
+Automatically detects the correct `Referer` from the CDN hostname.  
+Routes through Cloudflare Worker when `CF_WORKER_URL` is configured (zero Render bandwidth).
+
+---
+
+## Error Responses
+
+All errors follow this shape:
+
+```json
+{ "status": "error", "message": "Human-readable description" }
+```
+
+| HTTP | Meaning |
+|------|---------|
+| 400  | Bad request — invalid URL, missing field, unsupported site |
+| 401  | Missing API key |
+| 403  | Invalid API key, or expired/tampered proxy token |
+| 404  | No streams found (premium/private/deleted video) |
+| 422  | Video exists but streams cannot be extracted |
+| 500  | Unexpected server error |
+| 502  | Upstream network error (CDN or source site unreachable) |
 
 ---
 
 ## Environment Variables
 
-| Variable         | Required | Description |
-|------------------|----------|-------------|
-| `TERABOX_COOKIE` | Yes (for Terabox endpoints) | One or more Terabox `ndus` cookie values. Single: `ndus=VALUE`. Multiple: `ndus=VALUE1,ndus=VALUE2` |
-| `PORT`           | No       | Port to listen on (default: `5000`) |
-| `FLASK_DEBUG`    | No       | Set to `true` to enable debug mode |
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TERABOX_COOKIE` | Yes (Terabox) | — | `ndus=VALUE` or `ndus=V1,ndus=V2` for multi-account |
+| `API_KEY` | No | — | Protect all data endpoints. Leave unset for open access |
+| `GRABX_API_KEY` | No | — | Alias for `API_KEY` (used by some bots) |
+| `CF_WORKER_URL` | No | — | Cloudflare Worker URL — routes PH/Xvideos/XHamster/JAV streams there (zero Render bandwidth) |
+| `PROXY_TOKEN_TTL_HOURS` | No | `24` | How long signed proxy URLs remain valid |
+| `PORT` | No | `5000` | Port to listen on |
+| `FLASK_DEBUG` | No | `false` | Enable Flask debug mode |
+| `DEBUG_HEADERS` | No | `false` | Enable `/debug/headers` endpoint |
 
 ---
 
-## Running Locally
+## Project Structure
+
+```
+grabx-api/
+├── api/
+│   ├── index.py              # Flask app, auth middleware, core routes (~165 lines)
+│   ├── utils.py              # Shared: token signing, proxy URL builder, watch-page renderer
+│   └── extractors/
+│       ├── terabox.py        # Terabox helpers + /download + /proxy routes
+│       ├── pornhub.py        # PornHub helpers + /ph/* routes
+│       ├── javtiful.py       # JAVtiful helpers + /jav/* routes
+│       ├── xvideos.py        # Xvideos + XNXX helpers + routes + /adult/proxy
+│       └── xhamster.py       # XHamster decrypt + /xh/* routes
+├── worker/
+│   ├── worker.js             # Cloudflare Worker — proxies CDN streams
+│   └── wrangler.toml         # CF Worker config
+├── Dockerfile
+├── render.yaml
+├── requirements.txt
+└── docs.md                   # This file
+```
+
+---
+
+## Deploying to Render
+
+1. Push to GitHub
+2. Render → **New Web Service** → connect repo → **Docker** environment
+3. Add environment variables:
+
+```
+TERABOX_COOKIE = ndus=VALUE1,ndus=VALUE2
+API_KEY        = your_secret_key
+CF_WORKER_URL  = https://grabx-api.yourname.workers.dev  (optional)
+```
+
+4. Deploy. Port 8000 is used by gunicorn (set in Dockerfile).
+
+---
+
+## Deploying the Cloudflare Worker
 
 ```bash
+cd worker
+npm install
+npx wrangler login
+npx wrangler secret put API_KEY   # same value as on Render
+npx wrangler deploy
+```
+
+Then set `CF_WORKER_URL=https://grabx-api.yourname.workers.dev` on Render.  
+All PH, Xvideos, XNXX, XHamster, and JAVtiful streams will route through CF — zero Render bandwidth for streaming.
+
+---
+
+## Local Development
+
+```bash
+git clone https://github.com/MeherMankar/grabx-api
+cd grabx-api
 pip install -r requirements.txt
 ```
 
-Create a `.env` file:
-```
+`.env`:
+```env
 TERABOX_COOKIE=ndus=YOUR_NDUS_VALUE
+API_KEY=devkey
 ```
 
-Run the server:
 ```bash
-python -m api
+python api/index.py
+# or
+python -m flask --app api.index run
 ```
 
-The API will be available at `http://localhost:5000`.
-
----
-
-## Error Handling
-
-All endpoints return JSON with a `status` field of either `"success"` or `"error"`. On error, a `"message"` field describes the problem. HTTP status codes follow standard conventions:
-
-| Code | Meaning |
-|------|---------|
-| 200  | Success |
-| 400  | Bad request (invalid input) |
-| 404  | Resource not found |
-| 502  | Upstream network error |
-| 500  | Unexpected internal error |
+API at `http://localhost:5000`.
