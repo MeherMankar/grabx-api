@@ -180,9 +180,8 @@ async function serveWatchPage(viewkey, workerOrigin, apiKey, apiBase) {
       `<option value="${escHtml(o.proxy)}" data-fmt="${o.fmt}" data-dl="${escHtml(o.dl)}">${escHtml(o.label)}</option>`
     ).join("\n");
     const best = opts[0];
-    // For inline JS strings, encode & as \u0026 to avoid HTML interpretation issues
-    const bestDlJs    = best.dl.replace(/&/g, "\\u0026");
-    const bestProxyJs = best.proxy.replace(/&/g, "\\u0026");
+    const bestDlJs    = best.dl;
+    const bestProxyJs = best.proxy;
 
     const html = `<!DOCTYPE html>
 <html lang="en"><head>
