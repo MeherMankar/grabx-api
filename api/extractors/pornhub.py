@@ -362,7 +362,7 @@ def ph_proxy():
         ct   = upstream.headers.get("Content-Type", "video/mp2t" if is_ts else "video/mp4")
         disp = f'attachment; filename="{fname}"' if download_mode else f'inline; filename="{fname}"'
         rh   = {"Content-Disposition": disp, "Accept-Ranges": "bytes",
-                "Access-Control-Allow-Origin": "*"}
+                "Access-Control-Allow-Origin": "*", "X-Accel-Buffering": "no"}
         for h in ("Content-Length", "Content-Range"):
             if v := upstream.headers.get(h):
                 rh[h] = v

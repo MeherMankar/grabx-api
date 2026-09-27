@@ -356,11 +356,13 @@ def proxy():
         fname   = fname_m.group(1).strip() if fname_m else "download"
 
         def generate():
-            for chunk in upstream.iter_content(chunk_size=8192):
+            for chunk in upstream.iter_content(chunk_size=65536):
                 if chunk:
                     yield chunk
 
-        resp_headers = {"Content-Disposition": f'attachment; filename="{fname}"', "Accept-Ranges": "bytes"}
+        resp_headers = {"Content-Disposition": f'attachment; filename="{fname}"',
+                        "Accept-Ranges": "bytes",
+                        "X-Accel-Buffering": "no"}
         if cl := upstream.headers.get("Content-Length"):
             resp_headers["Content-Length"] = cl
         return Response(

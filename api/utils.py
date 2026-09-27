@@ -103,10 +103,16 @@ def make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
                    viewkey: str = "", quality: str = "", src_domain: str = "") -> str:
     """
     Build a signed proxy URL.
-    Routes /ph/proxy, /adult/proxy, /jav/proxy through CF Worker when configured.
-    /proxy (Terabox) always stays on Render (ndus cookie is IP-locked).
+
+    Routing rules:
+    - /ph/proxy   → CF Worker (PH CDN signed to Render IP; Worker auto-refreshes via viewkey)
+    - /jav/proxy  → CF Worker (JAV CDN not IP-locked)
+    - /adult/proxy → Render only — XHamster/Xvideos/XNXX CDN URLs embed the
+                     requesting IP (data=<IP>). CF Worker edge IPs differ from
+                     Render's, causing 403. Must stream through Render.
+    - /proxy      → Render only (Terabox ndus cookie is IP-locked)
     """
-    if CF_WORKER_URL and path in ("/ph/proxy", "/adult/proxy", "/jav/proxy"):
+    if CF_WORKER_URL and path in ("/ph/proxy", "/jav/proxy"):
         proxy_base = CF_WORKER_URL
     else:
         proxy_base = base_url

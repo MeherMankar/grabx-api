@@ -274,7 +274,13 @@ async function handleRequest(request, apiKey) {
     return await proxyToRender(request, apiKey);
   }
 
-  const PROXY_PATHS = ["/ph/proxy", "/proxy", "/adult/proxy", "/jav/proxy"];
+  const PROXY_PATHS = ["/ph/proxy", "/proxy", "/jav/proxy"];
+  // /adult/proxy must go through Render — XHamster/Xvideos/XNXX CDN URLs
+  // embed the requesting IP (data=<IP>). CF Worker edge IPs differ from
+  // Render's, causing 403. Redirect to Render for all adult CDN proxying.
+  if (path === "/adult/proxy") {
+    return Response.redirect(`${RENDER_BASE}${url.pathname}${url.search}`, 302);
+  }
 
   if (!PROXY_PATHS.includes(path)) {
     // /ph/watch/<viewkey> — serve player from Worker
