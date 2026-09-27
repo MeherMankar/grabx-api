@@ -66,10 +66,23 @@ def _fetch_page(url: str) -> str:
 
 
 def _extract_flashvars(html: str) -> dict:
-    m = re.search(r'var\s+flashvars_\d+\s*=\s*(\{.*?\})\s*;', html, re.DOTALL)
-    if not m:
-        raise ValueError("Could not find flashvars in the PornHub page.")
-    raw = m.group(1)
+    # Primary: use JSONDecoder.raw_decode starting at the opening brace.
+    # This handles any size JSON without regex backtracking issues on large pages.
+    m = re.search(r'var\s+flashvars_\d+\s*=\s*(\{)', html)
+    if m:
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(html, m.start(1))
+            if isinstance(obj, dict) and "mediaDefinitions" in obj:
+                return obj
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Fallback: regex-based extraction
+    m2 = re.search(r'var\s+flashvars_\d+\s*=\s*(\{.*?\})\s*;', html, re.DOTALL)
+    if not m2:
+        raise ValueError("Could not find flashvars in the PornHub page. "
+                         "Page structure may have changed or video is unavailable.")
+    raw = m2.group(1)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
