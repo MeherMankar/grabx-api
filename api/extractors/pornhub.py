@@ -193,6 +193,12 @@ def _parse_qualities(flashvars: dict) -> tuple:
 
 
 def get_all_qualities(ph_url: str):
+    from api.utils import cache_get, cache_set
+    cache_key = f"ph:{ph_url}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
     ph_url = _validate_url(ph_url)
 
     # Try our own scraper first (wrapped so any failure falls through to yt-dlp)
@@ -253,7 +259,9 @@ def get_all_qualities(ph_url: str):
     all_qs = mp4_qs + hls_only if (mp4_qs or hls_only) else hls_qs
     if not all_qs:
         raise ValueError("No downloadable streams found.")
-    return meta, all_qs
+    result = (meta, all_qs)
+    cache_set(cache_key, result)
+    return result
 
 
 # ---------------------------------------------------------------------------

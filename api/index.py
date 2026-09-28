@@ -132,6 +132,7 @@ def home():
 @app.route("/health")
 def health():
     import platform
+    from api.utils import cache_stats
     return jsonify({
         "status":   "ok",
         "python":   sys.version,
@@ -139,6 +140,7 @@ def health():
         "accounts_configured": get_account_count(),
         "auth":     "enabled" if API_KEY else "disabled",
         "proxy_backend": CF_WORKER_URL if CF_WORKER_URL else "render (this server)",
+        "cache":    cache_stats(),
     })
 
 

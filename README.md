@@ -31,11 +31,12 @@ A self-hosted Flask API that extracts direct download/stream links from multiple
 | Platform | Endpoint | Notes |
 |----------|----------|-------|
 | **Terabox** | `POST /download` | Requires `TERABOX_COOKIE`. Supports folders, 20+ mirror domains |
-| **PornHub** | `POST /ph/download` | All qualities, auto-refresh on CDN expiry |
+| **PornHub** | `POST /ph/download` | All qualities, yt-dlp fallback, auto-refresh on CDN expiry |
 | **Xvideos** | `POST /xv/download` | 360p/480p MP4 + HLS variants |
 | **XNXX** | `POST /xnxx/download` | Same extractor as Xvideos |
 | **XHamster** | `POST /xh/download` | 144p–720p MP4, PRNG URL decryption |
 | **JAVtiful** | `POST /jav/download` | Free 720p MP4 stream |
+| **Any site** | `POST /yt/download` | yt-dlp — Twitter/X, Reddit, Twitch, Dailymotion, Vimeo, 1000+ sites |
 
 All platforms have a `/watch` page for browser playback.
 
@@ -43,8 +44,11 @@ All platforms have a `/watch` page for browser playback.
 
 ## Features
 
-- **Zero-key streaming** — bot authenticates once; returned URLs are HMAC-signed, no key needed to stream
-- **Cloudflare Worker** — route all CDN streams through CF edge, zero Render bandwidth
+- **API key auth** — optional `X-API-Key` header guard, signed proxy tokens for streaming
+- **yt-dlp fallback** — when datacenter IPs are blocked, yt-dlp extracts MP4 DDLs via residential proxy
+- **Rotating proxy pool** — `PROXY_URL` accepts 10+ proxies, picks randomly per request
+- **Response caching** — extraction results cached 2h to avoid hammering the proxy
+- **Cloudflare Worker** — route all CDN streams through CF edge, zero server bandwidth
 - **DPI bypass** — `curl_cffi` Chrome TLS + HTTP/3/QUIC + Cloudflare DoH
 - **Terabox** — recursive folder support, video quality/resolution metadata, 20+ mirror domains
 - **XHamster** — proprietary PRNG URL decryption (matches yt-dlp extractor)
@@ -158,6 +162,7 @@ API available at `http://localhost:5000`.
    | `TERABOX_COOKIE` | `ndus=VALUE1,ndus=VALUE2` |
    | `API_KEY` | `your_secret_key` *(optional)* |
    | `CF_WORKER_URL` | `https://grabx-api.yourname.workers.dev` *(optional)* |
+   | `PROXY_URL` | `host:port:user:pass,...` *(optional — for PH/XV/XH MP4 DDLs)* |
 
 3. Click **Deploy** → you get `grabx-api-xxx.koyeb.app`
 

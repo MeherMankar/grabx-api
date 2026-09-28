@@ -153,6 +153,11 @@ def build_qualities(data: dict, base_url: str, proxy_path: str, referer: str) ->
 
 
 def get_xv_qualities(url: str):
+    from api.utils import cache_get, cache_set
+    cache_key = f"xv:{url}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
     parsed = urlparse(url)
     if not parsed.scheme:
         url = "https://" + url
@@ -163,12 +168,19 @@ def get_xv_qualities(url: str):
     html    = fetch_page(url, session)
     data    = extract_data(html, "xvideos.com")
     secs    = int(data.get("duration", 0) or 0)
-    return {"title": data.get("title", "Unknown"), "thumbnail": data.get("thumb", ""),
-            "duration": f"{secs // 60}:{secs % 60:02d}" if secs else "",
-            "duration_seconds": secs}, data
+    result  = ({"title": data.get("title", "Unknown"), "thumbnail": data.get("thumb", ""),
+                "duration": f"{secs // 60}:{secs % 60:02d}" if secs else "",
+                "duration_seconds": secs}, data)
+    cache_set(cache_key, result)
+    return result
 
 
 def get_xnxx_qualities(url: str):
+    from api.utils import cache_get, cache_set
+    cache_key = f"xnxx:{url}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
     parsed = urlparse(url)
     if not parsed.scheme:
         url = "https://" + url
@@ -179,9 +191,11 @@ def get_xnxx_qualities(url: str):
     html    = fetch_page(url, session)
     data    = extract_data(html, "xnxx.com")
     secs    = int(data.get("duration", 0) or 0)
-    return {"title": data.get("title", "Unknown"), "thumbnail": data.get("thumb", ""),
-            "duration": f"{secs // 60}:{secs % 60:02d}" if secs else "",
-            "duration_seconds": secs}, data
+    result  = ({"title": data.get("title", "Unknown"), "thumbnail": data.get("thumb", ""),
+                "duration": f"{secs // 60}:{secs % 60:02d}" if secs else "",
+                "duration_seconds": secs}, data)
+    cache_set(cache_key, result)
+    return result
 
 # ---------------------------------------------------------------------------
 # Routes

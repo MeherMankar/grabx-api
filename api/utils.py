@@ -356,3 +356,56 @@ def render_watch_page(meta: dict, qualities: list):
 </body>
 </html>"""
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+# ---------------------------------------------------------------------------
+# In-memory response cache with TTL
+# ---------------------------------------------------------------------------
+# Caches extraction results (qualities list + meta) so repeated requests for
+# the same URL don't hit the proxy or source site again for CACHE_TTL seconds.
+# Simple thread-safe dict — works fine for single-worker Gunicorn deployments.
+# ---------------------------------------------------------------------------
+
+import threading
+import time as _time_mod
+
+_cache_lock  = threading.Lock()
+_cache_store: dict = {}  # key -> {"data": ..., "expires": float}
+
+CACHE_TTL: int = int(os.environ.get("CACHE_TTL_SECONDS", str(2 * 3600)))  # default 2 hours
+
+
+def cache_get(key: str):
+    """Return cached value or None if missing/expired."""
+    with _cache_lock:
+        entry = _cache_store.get(key)
+        if entry and _time_mod.time() < entry["expires"]:
+            return entry["data"]
+        if entry:
+            del _cache_store[key]
+    return None
+
+
+def cache_set(key: str, data, ttl: int = None):
+    """Store value with TTL. Uses CACHE_TTL if ttl not specified."""
+    if ttl is None:
+        ttl = CACHE_TTL
+    with _cache_lock:
+        _cache_store[key] = {
+            "data":    data,
+            "expires": _time_mod.time() + ttl,
+        }
+        # Evict expired entries if cache grows large
+        if len(_cache_store) > 500:
+            now = _time_mod.time()
+            expired = [k for k, v in _cache_store.items() if v["expires"] < now]
+            for k in expired:
+                del _cache_store[k]
+
+
+def cache_stats() -> dict:
+    """Return cache stats for /health endpoint."""
+    with _cache_lock:
+        now = _time_mod.time()
+        total   = len(_cache_store)
+        active  = sum(1 for v in _cache_store.values() if v["expires"] > now)
+    return {"total": total, "active": active, "ttl_seconds": CACHE_TTL}

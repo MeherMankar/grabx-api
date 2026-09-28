@@ -159,8 +159,25 @@ def ytdlp_get_qualities(url: str, base_url: str,
                          cookies: dict = None) -> tuple:
     """
     Run yt-dlp extraction and build the standard qualities list.
-    Returns (meta, qualities) where qualities have proxy_url and download_url.
+    Results are cached for CACHE_TTL seconds to avoid hitting the proxy repeatedly.
     """
+    from api.utils import cache_get, cache_set
+    cache_key = f"ytdlp:{url}"
+    cached = cache_get(cache_key)
+    if cached:
+        meta, raw_formats = cached
+        # Rebuild proxy URLs with current base_url (may differ between requests)
+        qualities = []
+        for f in raw_formats:
+            ql  = f["quality"]
+            fmt = f.get("format", "mp4")
+            qualities.append({
+                **f,
+                "proxy_url":    make_proxy_url(base_url, proxy_path, f["url"], quality=ql),
+                "download_url": make_proxy_url(base_url, proxy_path, f["url"], extra="&dl=1", quality=ql),
+            })
+        return meta, qualities
+
     result = _ytdlp_extract(url, cookies=cookies)
 
     qualities = []
@@ -186,6 +203,13 @@ def ytdlp_get_qualities(url: str, base_url: str,
         "duration_seconds": result["duration_seconds"],
         "extractor":        result["extractor"],
     }
+
+    # Cache the raw formats (without proxy URLs — those depend on base_url)
+    raw_formats = [{"quality": q["quality"], "format": q["format"],
+                    "ext": q.get("ext","mp4"), "url": q["url"],
+                    "filesize": q.get("filesize",0)} for q in qualities]
+    cache_set(cache_key, (meta, raw_formats))
+
     return meta, qualities
 
 

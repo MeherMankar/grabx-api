@@ -280,7 +280,27 @@ Streams JAVtiful CDN content (fast-stream.jav.si) with correct Referer.
 
 ---
 
-## Adult CDN Proxy
+## yt-dlp Generic Extractor
+
+### `POST /yt/download`
+Extract stream/download links from **any yt-dlp supported URL**.  
+Works with PornHub, Xvideos, XHamster, Twitter/X, Reddit, Twitch clips, Dailymotion, Vimeo, and [1000+ more sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md).
+
+**Request**
+```json
+{ "url": "https://www.pornhub.org/view_video.php?viewkey=abc123" }
+```
+
+**Response** — same shape as `/ph/download` with `qualities` array.
+
+> Results are cached for 2 hours (configurable via `CACHE_TTL_SECONDS`).
+
+---
+
+### `GET /yt/watch?url=<video_url>`
+Browser video player for any yt-dlp supported URL. Always public.
+
+---
 
 ### `GET /adult/proxy?url=<encoded>`
 Unified CDN proxy for Xvideos, XNXX, and XHamster streams.  
@@ -317,7 +337,9 @@ All errors follow this shape:
 | `API_KEY` | No | — | Protect all data endpoints. Leave unset for open access |
 | `GRABX_API_KEY` | No | — | Alias for `API_KEY` (used by some bots) |
 | `CF_WORKER_URL` | No | — | Cloudflare Worker URL — routes PH/Xvideos/XHamster/JAV streams there (zero Render bandwidth) |
+| `PROXY_URL` | No | — | Comma-separated residential proxy pool. Format: `host:port:user:pass` or `http://user:pass@host:port`. Used by PH, XHamster, Xvideos, yt-dlp to bypass datacenter IP blocks |
 | `PROXY_TOKEN_TTL_HOURS` | No | `24` | How long signed proxy URLs remain valid |
+| `CACHE_TTL_SECONDS` | No | `7200` | How long extraction results are cached in memory (default 2 hours) |
 | `PORT` | No | `5000` | Port to listen on |
 | `FLASK_DEBUG` | No | `false` | Enable Flask debug mode |
 | `DEBUG_HEADERS` | No | `false` | Enable `/debug/headers` endpoint |

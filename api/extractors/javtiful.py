@@ -90,8 +90,15 @@ def _extract_data(html: str) -> dict:
 
 
 def get_all_qualities(url: str) -> dict:
+    from api.utils import cache_get, cache_set
     url = _validate_url(url)
-    return _extract_data(_fetch_page(url))
+    cache_key = f"jav:{url}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+    result = _extract_data(_fetch_page(url))
+    cache_set(cache_key, result)
+    return result
 
 
 def _build_quality_label(s: dict, i: int) -> str:

@@ -170,6 +170,11 @@ def extract_data(html: str) -> dict:
 
 
 def get_all_qualities(url: str) -> dict:
+    from api.utils import cache_get, cache_set
+    cache_key = f"xh:{url}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
     parsed = urlparse(url)
     if not parsed.scheme:
         url = "https://" + url
@@ -179,7 +184,9 @@ def get_all_qualities(url: str) -> dict:
         raise ValueError(f"Not a supported XHamster URL (host: {host!r}).")
     session = _cffi_session()
     html    = fetch_page(url, session)
-    return extract_data(html)
+    result  = extract_data(html)
+    cache_set(cache_key, result)
+    return result
 
 # ---------------------------------------------------------------------------
 # Routes
