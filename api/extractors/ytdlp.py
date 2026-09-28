@@ -56,6 +56,10 @@ def _ytdlp_extract(url: str, cookies: dict = None, proxy: str = None) -> dict:
     if cookies:
         ydl_opts["http_headers"]["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
 
+    # Use proxy if provided, or auto-pick from pool
+    if not proxy:
+        from api.utils import get_proxy
+        proxy = get_proxy()
     if proxy:
         ydl_opts["proxy"] = proxy
 

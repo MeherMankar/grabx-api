@@ -29,6 +29,51 @@ CF_WORKER_URL: str = os.environ.get("CF_WORKER_URL", "").rstrip("/")
 
 TOKEN_TTL: int = int(os.environ.get("PROXY_TOKEN_TTL_HOURS", "24")) * 3600
 
+# ---------------------------------------------------------------------------
+# Universal rotating proxy pool
+# ---------------------------------------------------------------------------
+# Set PROXY_URL on Koyeb/Render with one or more proxies (comma-separated).
+# Formats supported:
+#   host:port:user:pass          (webshare format)
+#   http://user:pass@host:port   (standard URL format)
+# A random proxy is picked per request to distribute load.
+# ---------------------------------------------------------------------------
+
+def _parse_proxy_list() -> list:
+    """Parse PROXY_URL env var into a list of http://user:pass@host:port strings."""
+    raw = (
+        os.environ.get("PROXY_URL", "").strip()
+        or os.environ.get("PH_PROXY", "").strip()
+    )
+    if not raw:
+        return []
+    proxies = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if entry.startswith("http://") or entry.startswith("https://") or entry.startswith("socks"):
+            proxies.append(entry)
+        else:
+            # host:port:user:pass format
+            parts = entry.split(":")
+            if len(parts) == 4:
+                host, port, user, password = parts
+                proxies.append(f"http://{user}:{password}@{host}:{port}")
+            elif len(parts) == 2:
+                host, port = parts
+                proxies.append(f"http://{host}:{port}")
+    return proxies
+
+
+def get_proxy() -> str:
+    """Return a random proxy URL from the pool, or empty string if none configured."""
+    proxies = _parse_proxy_list()
+    if not proxies:
+        return ""
+    import random
+    return random.choice(proxies)
+
 DESKTOP_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"

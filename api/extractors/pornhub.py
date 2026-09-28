@@ -48,7 +48,8 @@ def _validate_url(url: str) -> str:
 
 
 def _fetch_page(url: str) -> str:
-    proxy = os.environ.get("PH_PROXY", "").strip()
+    from api.utils import get_proxy
+    proxy = get_proxy()
     try:
         session = _cffi_session()
         kwargs = dict(allow_redirects=True, timeout=20,
@@ -218,11 +219,11 @@ def get_all_qualities(ph_url: str):
         print(f"[ph_qualities] trying yt-dlp fallback", file=sys.stderr)
         try:
             from api.extractors.ytdlp import _ytdlp_extract
-            ph_proxy = os.environ.get("PH_PROXY", "").strip()
+            from api.utils import get_proxy
             ytdlp_result = _ytdlp_extract(
                 ph_url,
                 cookies={"accessAgeDisclaimerPH": "1", "age_verified": "1", "platform": "pc"},
-                proxy=ph_proxy or None,
+                proxy=get_proxy() or None,
             )
             for f in ytdlp_result.get("formats", []):
                 if f.get("url"):

@@ -29,11 +29,16 @@ def _cffi_session(cookies: dict = None, domains: list = None):
 
 
 def fetch_page(url: str, session=None) -> str:
+    from api.utils import get_proxy
+    proxy = get_proxy()
     try:
         if session is None:
             session = _cffi_session()
-        resp = session.get(url, allow_redirects=True, timeout=20,
-                           http_version=3, doh_url="https://1.1.1.1/dns-query")
+        kwargs = dict(allow_redirects=True, timeout=20,
+                      http_version=3, doh_url="https://1.1.1.1/dns-query")
+        if proxy:
+            kwargs["proxies"] = {"http": proxy, "https": proxy}
+        resp = session.get(url, **kwargs)
     except Exception as e:
         raise ValueError(f"Network error fetching page: {e}")
     if resp.status_code != 200:
