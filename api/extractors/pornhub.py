@@ -188,19 +188,30 @@ def _parse_qualities(flashvars: dict) -> tuple:
 
 
 def get_all_qualities(ph_url: str):
-    ph_url    = _validate_url(ph_url)
-    html      = _fetch_page(ph_url)
-    flashvars = _extract_flashvars(html)
-    meta      = _extract_metadata(html)
-    hls_qs, get_media_url = _parse_qualities(flashvars)
-    mp4_qs = _resolve_get_media(get_media_url) if get_media_url else []
-    if not mp4_qs and get_media_url:
-        print(f"[ph_qualities] retrying get_media", file=sys.stderr)
-        mp4_qs = _resolve_get_media(get_media_url)
+    ph_url = _validate_url(ph_url)
 
-    # If still no MP4 (datacenter IP blocked by PH get_media), try yt-dlp
+    # Try our own scraper first
+    try:
+        html      = _fetch_page(ph_url)
+        flashvars = _extract_flashvars(html)
+        meta      = _extract_metadata(html)
+        hls_qs, get_media_url = _parse_qualities(flashvars)
+        mp4_qs = _resolve_get_media(get_media_url) if get_media_url else []
+        if not mp4_qs and get_media_url:
+            print(f"[ph_qualities] retrying get_media", file=sys.stderr)
+            mp4_qs = _resolve_get_media(get_media_url)
+        scraper_ok = True
+    except Exception as e:
+        print(f"[ph_qualities] scraper failed: {e} — trying yt-dlp", file=sys.stderr)
+        scraper_ok = False
+        html = ""
+        meta = {"title": "", "thumbnail": "", "duration": "", "duration_seconds": 0, "viewkey": ""}
+        mp4_qs = []
+        hls_qs = []
+
+    # If still no MP4 (datacenter IP blocked by PH get_media OR scraper failed), try yt-dlp
     if not mp4_qs:
-        print(f"[ph_qualities] get_media empty — trying yt-dlp fallback", file=sys.stderr)
+        print(f"[ph_qualities] trying yt-dlp fallback", file=sys.stderr)
         try:
             from api.extractors.ytdlp import _ytdlp_extract
             ytdlp_result = _ytdlp_extract(
@@ -208,19 +219,26 @@ def get_all_qualities(ph_url: str):
                 cookies={"accessAgeDisclaimerPH": "1", "age_verified": "1", "platform": "pc"},
             )
             for f in ytdlp_result.get("formats", []):
-                if f.get("ext") not in ("m3u8",) and f.get("url"):
+                if f.get("url"):
                     mp4_qs.append({
                         "quality": f["quality"],
                         "url":     f["url"],
-                        "format":  "mp4",
+                        "format":  f.get("format", "mp4"),
                     })
             if mp4_qs:
-                print(f"[ph_qualities] yt-dlp returned {len(mp4_qs)} MP4 formats", file=sys.stderr)
-                # Update meta with yt-dlp data if our scrape missed anything
+                print(f"[ph_qualities] yt-dlp returned {len(mp4_qs)} formats", file=sys.stderr)
                 if not meta.get("title") or meta["title"] == "Unknown Title":
                     meta["title"] = ytdlp_result.get("title", meta.get("title", ""))
                 if not meta.get("thumbnail"):
                     meta["thumbnail"] = ytdlp_result.get("thumbnail", "")
+                if not meta.get("duration_seconds"):
+                    meta["duration_seconds"] = ytdlp_result.get("duration_seconds", 0)
+                    meta["duration"] = ytdlp_result.get("duration", "")
+                # Extract viewkey from URL if missing
+                if not meta.get("viewkey"):
+                    import re as _re
+                    vk_m = _re.search(r'viewkey[=_]([a-z0-9]+)', ph_url, _re.IGNORECASE)
+                    meta["viewkey"] = vk_m.group(1) if vk_m else ""
         except Exception as e:
             print(f"[ph_qualities] yt-dlp fallback failed: {e}", file=sys.stderr)
 
