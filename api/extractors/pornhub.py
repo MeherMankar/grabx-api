@@ -190,7 +190,7 @@ def _parse_qualities(flashvars: dict) -> tuple:
 def get_all_qualities(ph_url: str):
     ph_url = _validate_url(ph_url)
 
-    # Try our own scraper first
+    # Try our own scraper first (wrapped so any failure falls through to yt-dlp)
     try:
         html      = _fetch_page(ph_url)
         flashvars = _extract_flashvars(html)
