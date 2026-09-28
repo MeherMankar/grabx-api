@@ -257,13 +257,13 @@ async function handleRequest(request, apiKey, apiBase) {
   const path = url.pathname;
 
   // POST endpoints — proxy to API with retry
-  const API_POST_PATHS = ["/download", "/ph/download", "/xv/download", "/xnxx/download", "/xh/download", "/jav/download"];
+  const API_POST_PATHS = ["/download", "/ph/download", "/xv/download", "/xnxx/download", "/xh/download", "/jav/download", "/yt/download"];
   if (API_POST_PATHS.includes(path) && request.method === "POST") {
     return await proxyToApi(request, apiKey, apiBase);
   }
 
   // Watch pages — redirect to API
-  const API_WATCH_PATHS = ["/xv/watch", "/xnxx/watch", "/xh/watch", "/jav/watch"];
+  const API_WATCH_PATHS = ["/xv/watch", "/xnxx/watch", "/xh/watch", "/jav/watch", "/yt/watch"];
   if (API_WATCH_PATHS.includes(path)) {
     return Response.redirect(`${apiBase}${path}${url.search}`, 302);
   }

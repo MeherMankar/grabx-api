@@ -29,6 +29,7 @@ from api.extractors.pornhub import bp as pornhub_bp
 from api.extractors.javtiful import bp as javtiful_bp
 from api.extractors.xvideos  import bp as xvideos_bp
 from api.extractors.xhamster import bp as xhamster_bp
+from api.extractors.ytdlp    import bp as ytdlp_bp
 
 app = Flask(__name__)
 
@@ -40,6 +41,7 @@ app.register_blueprint(pornhub_bp)
 app.register_blueprint(javtiful_bp)
 app.register_blueprint(xvideos_bp)
 app.register_blueprint(xhamster_bp)
+app.register_blueprint(ytdlp_bp)
 
 # ---------------------------------------------------------------------------
 # Auth middleware
@@ -50,6 +52,7 @@ _PUBLIC_PREFIXES = (
     "/ph/watch/", "/ph/proxy", "/proxy", "/adult/proxy",
     "/xv/watch",  "/xnxx/watch", "/xh/watch",
     "/jav/proxy", "/jav/watch",
+    "/yt/watch",
 )
 
 
@@ -120,6 +123,8 @@ def home():
             "/adult/proxy":  {"method": "GET",  "description": "Xvideos/XNXX/XHamster CDN proxy (token-auth)"},
             "/health":       {"method": "GET",  "description": "Health check (public)"},
             "/docs":         {"method": "GET",  "description": "API documentation (public)"},
+            "/yt/download":  {"method": "POST", "description": "yt-dlp extractor — any supported URL (PH, Xvideos, Reddit, Twitter/X, Twitch, etc.)"},
+            "/yt/watch":     {"method": "GET",  "description": "Browser player for any yt-dlp supported URL (public)"},
         },
     })
 

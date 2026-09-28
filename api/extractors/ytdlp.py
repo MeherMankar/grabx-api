@@ -1,0 +1,267 @@
+"""
+yt-dlp based extractor — generic fallback for any yt-dlp supported site.
+
+Used as:
+  1. Primary extractor for /yt/download (any supported URL)
+  2. Fallback in pornhub.py when get_media returns no MP4
+
+yt-dlp supports 1000+ sites including PornHub, Xvideos, XHamster, etc.
+Key advantage: uses its own IP-agnostic extraction that doesn't rely on
+the get_media signed-URL endpoint that PH blocks on datacenter IPs.
+"""
+
+import os
+import re
+import sys
+
+from flask import Blueprint, request, jsonify
+from urllib.parse import urlparse
+
+from api.utils import make_proxy_url, render_watch_page
+
+bp = Blueprint("ytdlp", __name__)
+
+# ---------------------------------------------------------------------------
+# yt-dlp extraction helper
+# ---------------------------------------------------------------------------
+
+def _ytdlp_extract(url: str, cookies: dict = None) -> dict:
+    """
+    Extract video info using yt-dlp.
+    Returns a dict with title, thumbnail, duration, duration_seconds, formats.
+    Each format has: quality, format_id, ext, url, filesize, vcodec, acodec.
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        raise ValueError("yt-dlp is not installed. Add yt-dlp to requirements.txt.")
+
+    ydl_opts = {
+        "quiet":           True,
+        "no_warnings":     True,
+        "extract_flat":    False,
+        "skip_download":   True,
+        "nocheckcertificate": True,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    }
+
+    # Add cookies via http_headers (works without a cookie jar file)
+    if cookies:
+        ydl_opts["http_headers"]["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    if not info:
+        raise ValueError("yt-dlp could not extract video info.")
+
+    # If it's a playlist, take the first entry
+    if info.get("_type") == "playlist":
+        entries = info.get("entries", [])
+        if not entries:
+            raise ValueError("Playlist is empty.")
+        info = entries[0]
+
+    formats = info.get("formats") or []
+
+    # Filter to video formats with a direct URL
+    video_formats = []
+    for f in formats:
+        if not f.get("url"):
+            continue
+        vcodec    = f.get("vcodec", "none")
+        acodec    = f.get("acodec", "none")
+        ext       = f.get("ext", "mp4")
+        protocol  = f.get("protocol", "https")
+
+        # Skip audio-only, storyboard, manifest-only
+        if ext in ("mhtml", "vtt"):
+            continue
+        # Skip pure audio
+        if vcodec in ("none", None) and acodec not in ("none", None):
+            continue
+
+        # Determine real format type
+        is_hls = protocol in ("m3u8", "m3u8_native") or ext == "m3u8"
+        fmt    = "hls" if is_hls else "mp4"
+
+        # Derive quality label from height
+        height = f.get("height")
+        if height:
+            ql = str(height)
+        else:
+            ql = f.get("format_note") or f.get("format_id") or "unknown"
+
+        video_formats.append({
+            "quality":   ql,
+            "format_id": f.get("format_id", ""),
+            "ext":       "mp4",  # normalise — both direct MP4 and HLS play as mp4
+            "format":    fmt,
+            "url":       f["url"],
+            "filesize":  f.get("filesize") or f.get("filesize_approx") or 0,
+            "vcodec":    vcodec,
+            "acodec":    acodec,
+            "tbr":       f.get("tbr") or 0,
+            "protocol":  protocol,
+        })
+
+    # Sort: direct MP4 first, then HLS; within each group best quality first
+    def _sort_key(f):
+        try:
+            h = int(f["quality"])
+        except ValueError:
+            h = 0
+        is_hls = 1 if f.get("format") == "hls" else 0
+        return (is_hls, -h, -f.get("tbr", 0))
+
+    video_formats.sort(key=_sort_key)
+
+    # Deduplicate by quality (keep best format per quality level)
+    seen_ql = set()
+    deduped = []
+    for f in video_formats:
+        if f["quality"] not in seen_ql:
+            seen_ql.add(f["quality"])
+            deduped.append(f)
+
+    if not deduped:
+        raise ValueError("No video streams found. Video may be private, premium-only, or geo-restricted.")
+
+    secs = int(info.get("duration") or 0)
+    return {
+        "title":            info.get("title") or info.get("fulltitle") or "Unknown Title",
+        "thumbnail":        info.get("thumbnail") or "",
+        "duration":         f"{secs // 3600}:{(secs % 3600) // 60:02d}:{secs % 60:02d}" if secs >= 3600
+                            else f"{secs // 60}:{secs % 60:02d}" if secs else "",
+        "duration_seconds": secs,
+        "webpage_url":      info.get("webpage_url") or url,
+        "extractor":        info.get("extractor") or "",
+        "formats":          deduped,
+    }
+
+
+def ytdlp_get_qualities(url: str, base_url: str,
+                         proxy_path: str = "/adult/proxy",
+                         cookies: dict = None) -> tuple:
+    """
+    Run yt-dlp extraction and build the standard qualities list.
+    Returns (meta, qualities) where qualities have proxy_url and download_url.
+    """
+    result = _ytdlp_extract(url, cookies=cookies)
+
+    qualities = []
+    for f in result["formats"]:
+        ql  = f["quality"]
+        ext = f.get("ext", "mp4")
+        fmt = "hls" if ext in ("m3u8",) else "mp4"
+        cdn_url = f["url"]
+        qualities.append({
+            "quality":      ql,
+            "format":       fmt,
+            "ext":          ext,
+            "url":          cdn_url,
+            "filesize":     f.get("filesize", 0),
+            "proxy_url":    make_proxy_url(base_url, proxy_path, cdn_url, quality=ql),
+            "download_url": make_proxy_url(base_url, proxy_path, cdn_url, extra="&dl=1", quality=ql),
+        })
+
+    meta = {
+        "title":            result["title"],
+        "thumbnail":        result["thumbnail"],
+        "duration":         result["duration"],
+        "duration_seconds": result["duration_seconds"],
+        "extractor":        result["extractor"],
+    }
+    return meta, qualities
+
+
+# ---------------------------------------------------------------------------
+# Generic /yt/download route
+# ---------------------------------------------------------------------------
+
+@bp.route("/yt/download", methods=["POST"])
+def yt_download():
+    """
+    Extract stream/download links from any yt-dlp supported URL.
+    Works with PornHub, Xvideos, XHamster, Twitter/X, Reddit, Twitch clips, etc.
+    Full list: https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md
+    """
+    body = request.get_json(silent=True)
+    if not body or "url" not in body:
+        return jsonify({"status": "error", "message": "'url' field is required in JSON body"}), 400
+
+    url      = body["url"].strip()
+    base_url = request.host_url.rstrip("/").replace("http://", "https://")
+
+    # Age-gate cookies for known platforms
+    parsed = urlparse(url)
+    host   = (parsed.hostname or "").lower()
+    cookies = {}
+    if "pornhub" in host or "phncdn" in host:
+        cookies = {"accessAgeDisclaimerPH": "1", "age_verified": "1", "platform": "pc"}
+    elif "xhamster" in host:
+        cookies = {"adc_ga_v2": "1", "is_adult_confirmed": "1", "xhamster-language": "en"}
+    elif "xvideos" in host or "xnxx" in host:
+        cookies = {}
+
+    try:
+        meta, qualities = ytdlp_get_qualities(url, base_url, "/adult/proxy", cookies)
+
+        if not qualities:
+            return jsonify({"status": "error", "message": "No streams found."}), 404
+
+        best = next((q for q in qualities if q["format"] == "mp4"), qualities[0])
+        watch_url = f"{base_url}/yt/watch?url={url}"
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "title":             meta["title"],
+                "thumbnail":         meta["thumbnail"],
+                "duration":          meta["duration"],
+                "duration_seconds":  meta["duration_seconds"],
+                "extractor":         meta["extractor"],
+                "watch_url":         watch_url,
+                "qualities":         qualities,
+                "best_proxy_url":    best["proxy_url"],
+                "best_download_url": best["download_url"],
+                "note": "yt-dlp extracted. Use best_proxy_url to stream or best_download_url to download.",
+            },
+        })
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        print(f"[ytdlp] exception: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": f"yt-dlp error: {e}"}), 500
+
+
+@bp.route("/yt/watch")
+def yt_watch():
+    """Browser video player for any yt-dlp supported URL."""
+    url = request.args.get("url", "").strip()
+    if not url:
+        return "<h2>Missing ?url= parameter</h2>", 400
+    try:
+        base_url = request.host_url.rstrip("/").replace("http://", "https://")
+        parsed   = urlparse(url)
+        host     = (parsed.hostname or "").lower()
+        cookies  = {}
+        if "pornhub" in host:
+            cookies = {"accessAgeDisclaimerPH": "1", "age_verified": "1", "platform": "pc"}
+        elif "xhamster" in host:
+            cookies = {"adc_ga_v2": "1", "is_adult_confirmed": "1", "xhamster-language": "en"}
+
+        meta, qualities = ytdlp_get_qualities(url, base_url, "/adult/proxy", cookies)
+        if not qualities:
+            return "<h2>No streams found.</h2>", 404
+        return render_watch_page(meta, qualities)
+    except Exception as e:
+        return (f'<body style="background:#0f0f0f;color:#eee;padding:40px">'
+                f'<h2 style="color:#f55">Error</h2><p>{e}</p></body>'), 500
