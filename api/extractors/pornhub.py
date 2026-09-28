@@ -48,10 +48,14 @@ def _validate_url(url: str) -> str:
 
 
 def _fetch_page(url: str) -> str:
+    proxy = os.environ.get("PH_PROXY", "").strip()
     try:
         session = _cffi_session()
-        resp = session.get(url, allow_redirects=True, timeout=20,
-                           http_version=3, doh_url="https://1.1.1.1/dns-query")
+        kwargs = dict(allow_redirects=True, timeout=20,
+                      http_version=3, doh_url="https://1.1.1.1/dns-query")
+        if proxy:
+            kwargs["proxies"] = {"http": proxy, "https": proxy}
+        resp = session.get(url, **kwargs)
     except Exception as e:
         err = str(e)
         if "resolve host" in err.lower() or "dns" in err.lower():
@@ -214,9 +218,11 @@ def get_all_qualities(ph_url: str):
         print(f"[ph_qualities] trying yt-dlp fallback", file=sys.stderr)
         try:
             from api.extractors.ytdlp import _ytdlp_extract
+            ph_proxy = os.environ.get("PH_PROXY", "").strip()
             ytdlp_result = _ytdlp_extract(
                 ph_url,
                 cookies={"accessAgeDisclaimerPH": "1", "age_verified": "1", "platform": "pc"},
+                proxy=ph_proxy or None,
             )
             for f in ytdlp_result.get("formats", []):
                 if f.get("url"):

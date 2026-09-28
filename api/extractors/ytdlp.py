@@ -25,7 +25,7 @@ bp = Blueprint("ytdlp", __name__)
 # yt-dlp extraction helper
 # ---------------------------------------------------------------------------
 
-def _ytdlp_extract(url: str, cookies: dict = None) -> dict:
+def _ytdlp_extract(url: str, cookies: dict = None, proxy: str = None) -> dict:
     """
     Extract video info using yt-dlp.
     Returns a dict with title, thumbnail, duration, duration_seconds, formats.
@@ -55,6 +55,9 @@ def _ytdlp_extract(url: str, cookies: dict = None) -> dict:
     # Add cookies via http_headers (works without a cookie jar file)
     if cookies:
         ydl_opts["http_headers"]["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+
+    if proxy:
+        ydl_opts["proxy"] = proxy
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
