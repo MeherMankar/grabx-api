@@ -348,49 +348,89 @@ def render_watch_page(meta: dict, qualities: list):
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <meta name="theme-color" content="#080a10"/>
   <title>{title}</title>
   <style>
-    *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
-    body{{background:#0f0f0f;color:#eee;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-          min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:24px 16px 48px}}
-    .container{{width:100%;max-width:960px}}
-    h1{{font-size:1.15rem;font-weight:600;margin-bottom:14px;line-height:1.4;color:#fff}}
-    .player-wrap{{position:relative;width:100%;background:#000;border-radius:8px;overflow:hidden}}
-    video{{width:100%;display:block;max-height:540px;background:#000}}
-    .controls{{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}}
-    select{{background:#1e1e1e;color:#eee;border:1px solid #444;border-radius:6px;
-            padding:8px 12px;font-size:.9rem;cursor:pointer;flex:1;min-width:120px}}
-    select:focus{{outline:none;border-color:#f90}}
-    .btn{{display:inline-flex;align-items:center;gap:6px;font-weight:700;font-size:.9rem;
-          padding:9px 18px;border-radius:6px;white-space:nowrap;
-          transition:background .15s;cursor:pointer;border:none}}
-    .btn-dl{{background:#f90;color:#000}}.btn-dl:hover{{background:#e88600}}
-    .btn-dl:disabled{{background:#666;cursor:not-allowed}}
-    .meta{{margin-top:10px;font-size:.8rem;color:#666}}
-    a{{color:#f90}}
-    .note{{margin-top:16px;font-size:.75rem;color:#444;text-align:center}}
+    :root{{color-scheme:dark;--bg:#080a10;--panel:#11141d;--line:#272c3a;--muted:#9299aa;--text:#f5f6fa;--accent:#8b7cff;--accent2:#5c4ee5}}
+    *,*::before,*::after{{box-sizing:border-box}}
+    body{{margin:0;min-height:100vh;background:radial-gradient(ellipse at 50% -20%,#28234b 0,transparent 48%),var(--bg);color:var(--text);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:32px 18px 54px}}
+    .container{{width:min(100%,1080px);margin:0 auto}}
+    .topbar{{display:flex;justify-content:space-between;align-items:center;margin:0 0 20px;color:var(--muted);font-size:.82rem}}
+    .brand{{display:flex;align-items:center;gap:9px;color:var(--text);font-weight:750;letter-spacing:.02em}}
+    .brand-mark{{width:28px;height:28px;display:grid;place-items:center;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:white}}
+    .top-link{{color:#c5c0ff;text-decoration:none}}
+    .top-link:hover{{color:white}}
+    h1{{font-size:clamp(1.15rem,2.8vw,1.8rem);line-height:1.3;letter-spacing:-.025em;margin:0 0 16px;font-weight:720;overflow-wrap:anywhere}}
+    .live-badge{{display:inline-flex;vertical-align:middle;align-items:center;gap:6px;margin-left:8px;padding:4px 9px;border-radius:999px;background:#39171e;color:#ff8795;font-size:.68rem;letter-spacing:.08em;font-weight:800}}
+    .live-dot{{width:7px;height:7px;border-radius:50%;background:#ff5268;box-shadow:0 0 10px #ff5268}}
+    .player-shell{{padding:1px;border-radius:18px;background:linear-gradient(135deg,#454064,#202431 38%,#35304d);box-shadow:0 24px 70px #0008}}
+    .player-wrap{{position:relative;aspect-ratio:16/9;width:100%;background:#030407;border-radius:17px;overflow:hidden}}
+    video{{position:absolute;inset:0;width:100%;height:100%;display:block;object-fit:contain;background:#030407}}
+    .player-message{{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;background:linear-gradient(135deg,#10121bdd,#090a10e8);transition:opacity .2s;pointer-events:none}}
+    .player-message.hidden{{opacity:0}}
+    .spinner{{width:34px;height:34px;border:3px solid #ffffff24;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}}
+    @keyframes spin{{to{{transform:rotate(360deg)}}}}
+    .message-title{{font-weight:700}}.message-detail{{max-width:440px;color:var(--muted);font-size:.88rem;line-height:1.5}}
+    .control-panel{{margin-top:16px;padding:16px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,#151822,#10131b)}}
+    .controls{{display:flex;align-items:end;gap:12px;flex-wrap:wrap}}
+    .field{{display:grid;gap:7px;min-width:120px;flex:1}}
+    .field-label{{font-size:.69rem;font-weight:750;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}}
+    select{{width:100%;min-height:44px;background:#0b0d13;color:var(--text);border:1px solid #343949;border-radius:10px;padding:0 38px 0 12px;font-size:.9rem;cursor:pointer}}
+    select:focus-visible,button:focus-visible,a:focus-visible{{outline:2px solid #b0a8ff;outline-offset:3px}}
+    .btn{{min-height:44px;display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:0 15px;border:1px solid #3a4050;border-radius:10px;background:#1a1e29;color:var(--text);font-size:.88rem;font-weight:700;text-decoration:none;white-space:nowrap;cursor:pointer;transition:transform .15s,border-color .15s,background .15s}}
+    .btn:hover{{transform:translateY(-1px);border-color:#69628f;background:#222636}}
+    .btn-primary{{border-color:transparent;background:linear-gradient(135deg,var(--accent),var(--accent2));color:white;box-shadow:0 5px 18px #6256db40}}
+    .btn-primary:hover{{background:linear-gradient(135deg,#a298ff,#6b5cf0);border-color:transparent}}
+    .btn:disabled{{opacity:.58;cursor:wait;transform:none}}
+    .meta-row{{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:15px;padding-top:13px;border-top:1px solid var(--line);color:var(--muted);font-size:.82rem}}
+    .status{{display:flex;align-items:center;gap:8px;min-width:0}}
+    .status-dot{{width:8px;height:8px;flex:none;border-radius:50%;background:#4acb91;box-shadow:0 0 9px #4acb9166}}
+    .status.error .status-dot{{background:#ff687a;box-shadow:0 0 9px #ff687a66}}
+    .meta-right{{white-space:nowrap}}
+    .meta-right a{{color:#c5c0ff;text-decoration:none}}
+    .note{{margin:15px 4px 0;color:#747b8d;font-size:.76rem;line-height:1.6}}
+    .shortcuts{{color:#a6adbd}}
+    @media(max-width:620px){{body{{padding:20px 12px 36px}}.topbar{{margin-bottom:16px}}.player-shell{{border-radius:13px}}.player-wrap{{border-radius:12px}}.control-panel{{padding:12px;border-radius:13px}}.controls{{display:grid;grid-template-columns:1fr 1fr;align-items:stretch;gap:10px}}.field:first-child{{grid-column:1/-1}}.btn{{width:100%;padding:0 10px}}.meta-row{{align-items:flex-start;flex-direction:column}}.meta-right{{white-space:normal}}}}
+    @media(prefers-reduced-motion:reduce){{*,*::before,*::after{{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}}}
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>{title}{' <span style="color:#f55;font-size:.72em">LIVE</span>' if is_live else ''}</h1>
-    <div class="player-wrap">
-      <video id="player" controls preload="metadata" poster="{thumbnail}">
-        Your browser does not support HTML5 video.
-      </video>
+    <div class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">&#9654;</span> GRABX <span style="color:var(--muted);font-weight:500">PLAYER</span></div>
+      <a class="top-link" href="https://github.com/MeherMankar/grabx-api" target="_blank" rel="noopener noreferrer">About GrabX &#8599;</a>
     </div>
-    <div class="controls">
-      <select id="qualitySelect">{options_html}</select>
-      <select id="playbackRate" aria-label="Playback speed">
-        <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
-        <option value="1" selected>1×</option><option value="1.25">1.25×</option>
-        <option value="1.5">1.5×</option><option value="2">2×</option>
-      </select>
-      <button id="dlBtn" class="btn btn-dl">&#8595; Download</button>
-      <a id="directLink" class="btn" href="{html_attr(best.get('proxy_url',''))}" target="_blank" style="background:#333;color:#eee;font-size:.8rem">&#8599; Open stream</a>
+    <h1>{title}{' <span class="live-badge"><span class="live-dot"></span> LIVE</span>' if is_live else ''}</h1>
+    <div class="player-shell">
+      <div class="player-wrap">
+        <video id="player" controls playsinline preload="metadata" poster="{thumbnail}">
+          Your browser does not support HTML5 video.
+        </video>
+        <div class="player-message" id="playerMessage" role="status">
+          <span class="spinner" id="playerSpinner"></span>
+          <span class="message-title" id="messageTitle">Preparing stream</span>
+          <span class="message-detail" id="messageDetail">Connecting to the video source…</span>
+        </div>
+      </div>
     </div>
-    <div class="meta">{'Duration: ' + duration + ' &nbsp;·&nbsp; ' if duration else ''}Powered by <a href="https://github.com/MeherMankar/grabx-api" target="_blank">GrabX API</a></div>
-    <p class="note">💡 Right-click <b>Open stream</b> → "Save link as" to download. For HLS: open in VLC.</p>
+    <section class="control-panel" aria-label="Player controls">
+      <div class="controls">
+        <label class="field"><span class="field-label">Quality</span><select id="qualitySelect">{options_html}</select></label>
+        <label class="field"><span class="field-label">Speed</span><select id="playbackRate" aria-label="Playback speed">
+          <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+          <option value="1" selected>Normal</option><option value="1.25">1.25×</option>
+          <option value="1.5">1.5×</option><option value="2">2×</option>
+        </select></label>
+        <button id="dlBtn" class="btn btn-primary" type="button">&#8595; Download</button>
+        <button id="copyBtn" class="btn" type="button">&#128203; Copy link</button>
+        <button id="fullscreenBtn" class="btn" type="button">&#9974; Fullscreen</button>
+      </div>
+      <div class="meta-row">
+        <div class="status" id="streamStatus"><span class="status-dot"></span><span id="statusText">Ready to play</span></div>
+        <div class="meta-right">{'Duration: ' + duration + ' &nbsp;·&nbsp; ' if duration else ''}<a href="https://github.com/MeherMankar/grabx-api" target="_blank" rel="noopener noreferrer">Powered by GrabX</a></div>
+      </div>
+    </section>
+    <p class="note">Tip: use the quality menu to switch streams. <span class="shortcuts">Keyboard: Space to play/pause · F for fullscreen · &#8592;/&#8594; to seek</span></p>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
@@ -399,20 +439,40 @@ def render_watch_page(meta: dict, qualities: list):
     const sel   = document.getElementById('qualitySelect');
     const rate  = document.getElementById('playbackRate');
     const dlBtn = document.getElementById('dlBtn');
-    const directLink = document.getElementById('directLink');
+    const copyBtn = document.getElementById('copyBtn');
+    const fullscreenBtn = document.getElementById('fullscreenBtn');
+    const playerMessage = document.getElementById('playerMessage');
+    const playerSpinner = document.getElementById('playerSpinner');
+    const messageTitle = document.getElementById('messageTitle');
+    const messageDetail = document.getElementById('messageDetail');
+    const status = document.getElementById('streamStatus');
+    const statusText = document.getElementById('statusText');
     rate.addEventListener('change', () => {{ video.playbackRate = Number(rate.value); }});
     let hls     = null;
     let dash    = null;
     let currentDlUrl = {best_dl};
     let currentFmt   = {best_fmt};
 
+    function setStatus(text, error = false) {{
+      statusText.textContent = text;
+      status.classList.toggle('error', error);
+    }}
+
+    function showMessage(title, detail, spinning = false) {{
+      messageTitle.textContent = title;
+      messageDetail.textContent = detail;
+      playerSpinner.hidden = !spinning;
+      playerMessage.classList.remove('hidden');
+    }}
+
     function loadSrc(streamUrl, fmt, dlUrl) {{
       const isHls = fmt === 'hls' || streamUrl.includes('.m3u8');
       const isDash = fmt === 'dash' || streamUrl.includes('.mpd');
       currentDlUrl = dlUrl; currentFmt = fmt;
-      directLink.href = streamUrl;
       // Update button label based on format
-      dlBtn.textContent = (isHls || isDash) ? '📋 Copy Stream URL' : '↓ Download';
+      dlBtn.textContent = (isHls || isDash) ? 'Copy stream URL' : '↓ Download';
+      showMessage('Preparing stream', 'Connecting to the video source…', true);
+      setStatus('Loading stream');
       if (hls) {{ hls.destroy(); hls = null; }}
       if (dash) {{ dash.reset(); dash = null; }}
       if (isHls) {{
@@ -420,17 +480,59 @@ def render_watch_page(meta: dict, qualities: list):
           hls = new Hls({{ enableWorker: true }});
           hls.loadSource(streamUrl);
           hls.attachMedia(video);
-          hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {{}}));
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {{ playerMessage.classList.add('hidden'); setStatus('Playing HLS stream'); video.play().catch(() => {{}}); }});
+          hls.on(Hls.Events.ERROR, (_event, data) => {{
+            if (data.fatal) {{ showMessage('Stream unavailable', 'The HLS source could not be loaded. Try another quality or try again later.'); setStatus('Stream error', true); }}
+          }});
         }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
           video.src = streamUrl; video.play().catch(() => {{}});
+        }} else {{
+          showMessage('HLS is not supported', 'Try a modern browser with HLS playback support.');
+          setStatus('Unsupported format', true);
         }}
       }} else if (isDash && window.dashjs) {{
         dash = dashjs.MediaPlayer().create();
         dash.initialize(video, streamUrl, true);
+        dash.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, () => {{ playerMessage.classList.add('hidden'); setStatus('Playing DASH stream'); }});
+        dash.on(dashjs.MediaPlayer.events.ERROR, () => {{ showMessage('Stream unavailable', 'The DASH source could not be loaded. Try another quality or try again later.'); setStatus('Stream error', true); }});
       }} else {{
         video.src = streamUrl; video.load();
       }}
     }}
+
+    video.addEventListener('playing', () => {{ playerMessage.classList.add('hidden'); setStatus('Playing'); }});
+    video.addEventListener('waiting', () => {{ showMessage('Buffering', 'The stream is loading…', true); setStatus('Buffering'); }});
+    video.addEventListener('canplay', () => {{
+      playerMessage.classList.add('hidden');
+      if (video.paused) setStatus('Ready to play');
+    }});
+    video.addEventListener('error', () => {{ showMessage('Stream unavailable', 'The source may have expired or be temporarily unavailable. Try another quality.'); setStatus('Stream error', true); }});
+    video.addEventListener('pause', () => {{ if (!video.ended) setStatus('Paused'); }});
+    video.addEventListener('ended', () => setStatus('Playback ended'));
+
+    fullscreenBtn.addEventListener('click', async () => {{
+      try {{
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else await document.querySelector('.player-shell').requestFullscreen();
+      }} catch(e) {{ setStatus('Fullscreen unavailable', true); }}
+    }});
+    copyBtn.addEventListener('click', async () => {{
+      try {{
+        await navigator.clipboard.writeText(video.currentSrc || video.src || sel.value);
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => {{ copyBtn.textContent = 'Copy link'; }}, 1800);
+      }} catch(e) {{
+        prompt('Copy stream URL:', video.currentSrc || video.src || sel.value);
+      }}
+    }});
+
+    document.addEventListener('keydown', (event) => {{
+      if (event.target instanceof HTMLElement && event.target.matches('input,select,textarea,button')) return;
+      if (event.code === 'Space') {{ event.preventDefault(); video.paused ? video.play().catch(() => {{}}) : video.pause(); }}
+      if (event.key.toLowerCase() === 'f') fullscreenBtn.click();
+      if (event.key === 'ArrowLeft') video.currentTime = Math.max(0, video.currentTime - 10);
+      if (event.key === 'ArrowRight' && Number.isFinite(video.duration)) video.currentTime = Math.min(video.duration, video.currentTime + 10);
+    }});
 
     dlBtn.addEventListener('click', async function() {{
       if (currentFmt === 'hls' || currentFmt === 'dash') {{
@@ -438,8 +540,8 @@ def render_watch_page(meta: dict, qualities: list):
         // Copy the stream URL to clipboard and show a message.
         try {{
           await navigator.clipboard.writeText(currentDlUrl);
-          dlBtn.textContent = '✓ URL Copied!';
-          setTimeout(() => {{ dlBtn.textContent = '↓ Download'; }}, 2000);
+          dlBtn.textContent = 'Copied!';
+          setTimeout(() => {{ dlBtn.textContent = 'Copy stream URL'; }}, 2000);
         }} catch(e) {{
           // Fallback: prompt user to copy manually
           const msg = 'HLS stream URL (copy and open in VLC):\\n' + currentDlUrl;
@@ -447,7 +549,7 @@ def render_watch_page(meta: dict, qualities: list):
         }}
         return;
       }}
-      dlBtn.textContent = 'Preparing...'; dlBtn.disabled = true;
+      dlBtn.textContent = 'Preparing…'; dlBtn.disabled = true;
       try {{
         const resp = await fetch(currentDlUrl);
         if (!resp.ok) throw new Error('HTTP ' + resp.status);

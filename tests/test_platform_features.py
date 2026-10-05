@@ -191,6 +191,10 @@ class FeatureTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", page)
         self.assertIn("dashjs.MediaPlayer()", page)
         self.assertIn('id="playbackRate"', page)
+        self.assertIn('id="fullscreenBtn"', page)
+        self.assertIn('id="copyBtn"', page)
+        self.assertIn("Stream unavailable", page)
+        self.assertIn("playsinline", page)
 
 
 if __name__ == "__main__":
