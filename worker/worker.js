@@ -286,7 +286,7 @@ async function handleRequest(request, apiKey, apiBase) {
       { status: 404, headers: { "Content-Type": "application/json" } });
   }
 
-  const cdnUrl      = url.searchParams.get("url") || "";
+  let cdnUrl         = url.searchParams.get("url") || "";
   const tokenB64    = url.searchParams.get("_t")  || "";
   const expiryStr   = url.searchParams.get("_e")  || "";
   const downloadMode = url.searchParams.get("dl") === "1";
