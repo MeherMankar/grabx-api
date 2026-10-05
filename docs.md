@@ -45,6 +45,11 @@ For production deployments, keep this enabled; without it, download/proxy routes
 | `GET /xnxx/watch?url=` | XNXX player |
 | `GET /xh/watch?url=` | XHamster player |
 | `GET /jav/watch?url=` | JAVtiful player |
+| `GET /redtube/watch?url=` | RedTube player |
+| `GET /youporn/watch?url=` | YouPorn player |
+| `GET /eporner/watch?url=` | Eporner player |
+| `GET /spankbang/watch?url=` | SpankBang player |
+| `GET /porntrex/watch?url=` | PornTrex player |
 | All `/proxy`, `/ph/proxy`, `/adult/proxy`, `/jav/proxy` | CDN proxies (token-auth, see below) |
 
 ### Signed proxy tokens
@@ -52,6 +57,12 @@ For production deployments, keep this enabled; without it, download/proxy routes
 When you call a download endpoint with your key, **all returned proxy/stream URLs are pre-signed** with a short-lived HMAC token. Anyone holding those URLs can stream/download without a key — no key leakage in browser URLs.
 
 Token TTL: **24 hours** (configurable via `PROXY_TOKEN_TTL_HOURS`).
+
+Download and proxy APIs require `API_KEY`. Public health/docs/watch routes remain
+available without it. Requests are rate-limited per API key or client IP (60/minute
+by default; signed stream proxy requests have a 1,200/minute ceiling to avoid
+interrupting segmented playback). Authenticated administrators can inspect recent limit violations at
+`GET /admin/abuse` and clear the extraction cache with `POST /admin/cache/clear`.
 
 ---
 
@@ -302,6 +313,35 @@ Browser video player for any yt-dlp supported URL. Always public.
 
 ---
 
+## Async Jobs
+
+`POST /jobs` accepts `{"url": "https://..."}` and returns HTTP `202` with a
+`job_id` and `status_url`. Poll `GET /jobs/<job_id>` for `queued`, `started`,
+`finished`, or `failed`; completed jobs contain the standard extraction result.
+Successful results are retained for one hour and failures for one day.
+
+Run at least one RQ worker alongside the web service:
+
+```bash
+rq worker grabx
+```
+
+## Additional adult sites
+
+Each download route accepts `{"url": "..."}` and returns the standard qualities
+response. A public `/watch?url=...` player is available for each site. Extraction
+uses yt-dlp and therefore depends on support in the installed yt-dlp release.
+
+| Site | Download endpoint | Accepted hosts |
+|------|-------------------|----------------|
+| RedTube | `POST /redtube/download` | `redtube.com`, `redtube.xxx` |
+| YouPorn | `POST /youporn/download` | `youporn.com`, `.net`, `.org`, `.xxx` |
+| Eporner | `POST /eporner/download` | `eporner.com`, `eporner.net` |
+| SpankBang | `POST /spankbang/download` | `spankbang.com` |
+| PornTrex | `POST /porntrex/download` | `porntrex.com` |
+
+`/yt/download` remains the generic fallback for other yt-dlp-supported sites.
+
 ### `GET /adult/proxy?url=<encoded>`
 Unified CDN proxy for Xvideos, XNXX, and XHamster streams.  
 Automatically detects the correct `Referer` from the CDN hostname.  
@@ -334,12 +374,17 @@ All errors follow this shape:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `TERABOX_COOKIE` | Yes (Terabox) | — | `ndus=VALUE` or `ndus=V1,ndus=V2` for multi-account |
-| `API_KEY` | No | — | Protect all data endpoints. Leave unset for open access |
+| `API_KEY` | Yes (protected routes) | — | Protect download/proxy/job endpoints; must be set in production |
 | `GRABX_API_KEY` | No | — | Alias for `API_KEY` (used by some bots) |
 | `CF_WORKER_URL` | No | — | Cloudflare Worker URL — routes PH/Xvideos/XHamster/JAV streams there (zero Render bandwidth) |
 | `PROXY_URL` | No | — | Comma-separated residential proxy pool. Format: `host:port:user:pass` or `http://user:pass@host:port`. Used by PH, XHamster, Xvideos, yt-dlp to bypass datacenter IP blocks |
 | `PROXY_TOKEN_TTL_HOURS` | No | `24` | How long signed proxy URLs remain valid |
-| `CACHE_TTL_SECONDS` | No | `7200` | How long extraction results are cached in memory (default 2 hours) |
+| `CACHE_TTL_SECONDS` | No | `7200` | Extraction-result cache duration (default 2 hours) |
+| `CACHE_TTL_<SITE>_SECONDS` | No | global TTL | Optional site-specific override, e.g. `CACHE_TTL_PH_SECONDS` or `CACHE_TTL_YTDLP_SECONDS` |
+| `REDIS_URL` | Production | — | Redis URL shared by web app and RQ workers; required in production |
+| `API_RATE_LIMIT_PER_MINUTE` | No | `60` | Request limit per API key or client IP |
+| `PROXY_RATE_LIMIT_PER_MINUTE` | No | `1200` | Per-client limit for stream proxy requests |
+| `APP_ENV` | Production | — | Set to `production` to require and ping Redis at startup |
 | `PORT` | No | `5000` | Port to listen on |
 | `FLASK_DEBUG` | No | `false` | Enable Flask debug mode |
 | `DEBUG_HEADERS` | No | `false` | Enable `/debug/headers` endpoint |
@@ -353,12 +398,15 @@ grabx-api/
 ├── api/
 │   ├── index.py              # Flask app, auth middleware, core routes (~165 lines)
 │   ├── utils.py              # Shared: token signing, proxy URL builder, watch-page renderer
+│   ├── jobs.py               # Redis/RQ background extraction jobs
 │   └── extractors/
 │       ├── terabox.py        # Terabox helpers + /download + /proxy routes
 │       ├── pornhub.py        # PornHub helpers + /ph/* routes
 │       ├── javtiful.py       # JAVtiful helpers + /jav/* routes
 │       ├── xvideos.py        # Xvideos + XNXX helpers + routes + /adult/proxy
-│       └── xhamster.py       # XHamster decrypt + /xh/* routes
+│       ├── xhamster.py       # XHamster decrypt + /xh/* routes
+│       ├── adult_sites.py    # Registry-backed additional yt-dlp site routes
+│       └── registry.py       # Shared site adapter contract and registry
 ├── worker/
 │   ├── worker.js             # Cloudflare Worker — proxies CDN streams
 │   └── wrangler.toml         # CF Worker config
@@ -379,10 +427,14 @@ grabx-api/
 ```
 TERABOX_COOKIE = ndus=VALUE1,ndus=VALUE2
 API_KEY        = your_secret_key
+REDIS_URL      = redis://...
+APP_ENV        = production
 CF_WORKER_URL  = https://grabx-api.yourname.workers.dev  (optional)
 ```
 
-4. Deploy. Port 8000 is used by gunicorn (set in Dockerfile).
+4. Run `rq worker grabx` as a separate background worker with the same Redis
+   and API key configuration.
+5. Deploy. Port 8000 is used by gunicorn (set in Dockerfile).
 
 ---
 
@@ -413,6 +465,8 @@ pip install -r requirements.txt
 ```env
 TERABOX_COOKIE=ndus=YOUR_NDUS_VALUE
 API_KEY=devkey
+# Optional locally; required for async jobs and recommended for shared cache.
+# REDIS_URL=redis://localhost:6379/0
 ```
 
 ```bash

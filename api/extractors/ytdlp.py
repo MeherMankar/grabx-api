@@ -15,9 +15,9 @@ import re
 import sys
 
 from flask import Blueprint, request, jsonify
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
-from api.utils import make_proxy_url, render_watch_page
+from api.utils import make_proxy_url, render_watch_page, validate_proxy_target
 
 bp = Blueprint("ytdlp", __name__)
 
@@ -97,7 +97,8 @@ def _ytdlp_extract(url: str, cookies: dict = None, proxy: str = None) -> dict:
 
         # Determine real format type
         is_hls = protocol in ("m3u8", "m3u8_native") or ext == "m3u8"
-        fmt    = "hls" if is_hls else "mp4"
+        is_dash = ext == "mpd" or str(f.get("url", "")).lower().split("?")[0].endswith(".mpd")
+        fmt    = "hls" if is_hls else "dash" if is_dash else "mp4"
 
         # Derive quality label from height
         height = f.get("height")
@@ -109,7 +110,7 @@ def _ytdlp_extract(url: str, cookies: dict = None, proxy: str = None) -> dict:
         video_formats.append({
             "quality":   ql,
             "format_id": f.get("format_id", ""),
-            "ext":       "mp4",  # normalise — both direct MP4 and HLS play as mp4
+            "ext":       ext,
             "format":    fmt,
             "url":       f["url"],
             "filesize":  f.get("filesize") or f.get("filesize_approx") or 0,
@@ -125,8 +126,8 @@ def _ytdlp_extract(url: str, cookies: dict = None, proxy: str = None) -> dict:
             h = int(f["quality"])
         except ValueError:
             h = 0
-        is_hls = 1 if f.get("format") == "hls" else 0
-        return (is_hls, -h, -f.get("tbr", 0))
+        format_rank = {"mp4": 0, "hls": 1, "dash": 2}.get(f.get("format"), 3)
+        return (format_rank, -h, -f.get("tbr", 0))
 
     video_formats.sort(key=_sort_key)
 
@@ -145,6 +146,8 @@ def _ytdlp_extract(url: str, cookies: dict = None, proxy: str = None) -> dict:
     return {
         "title":            info.get("title") or info.get("fulltitle") or "Unknown Title",
         "thumbnail":        info.get("thumbnail") or "",
+        "is_live":          bool(info.get("is_live")),
+        "live_status":      info.get("live_status") or "",
         "duration":         f"{secs // 3600}:{(secs % 3600) // 60:02d}:{secs % 60:02d}" if secs >= 3600
                             else f"{secs // 60}:{secs % 60:02d}" if secs else "",
         "duration_seconds": secs,
@@ -166,17 +169,19 @@ def ytdlp_get_qualities(url: str, base_url: str,
     cached = cache_get(cache_key)
     if cached:
         meta, raw_formats = cached
-        # Rebuild proxy URLs with current base_url (may differ between requests)
-        qualities = []
-        for f in raw_formats:
-            ql  = f["quality"]
-            fmt = f.get("format", "mp4")
-            qualities.append({
-                **f,
-                "proxy_url":    make_proxy_url(base_url, proxy_path, f["url"], quality=ql),
-                "download_url": make_proxy_url(base_url, proxy_path, f["url"], extra="&dl=1", quality=ql),
-            })
-        return meta, qualities
+        if meta.get("is_live"):
+            cached = None
+        else:
+            # Rebuild proxy URLs with current base_url (may differ between requests)
+            qualities = []
+            for f in raw_formats:
+                ql  = f["quality"]
+                qualities.append({
+                    **f,
+                    "proxy_url":    make_proxy_url(base_url, proxy_path, f["url"], quality=ql),
+                    "download_url": make_proxy_url(base_url, proxy_path, f["url"], extra="&dl=1", quality=ql),
+                })
+            return meta, qualities
 
     result = _ytdlp_extract(url, cookies=cookies)
 
@@ -184,7 +189,7 @@ def ytdlp_get_qualities(url: str, base_url: str,
     for f in result["formats"]:
         ql  = f["quality"]
         ext = f.get("ext", "mp4")
-        fmt = "hls" if ext in ("m3u8",) else "mp4"
+        fmt = f.get("format") or ("hls" if ext == "m3u8" else "dash" if ext == "mpd" else "mp4")
         cdn_url = f["url"]
         qualities.append({
             "quality":      ql,
@@ -199,6 +204,8 @@ def ytdlp_get_qualities(url: str, base_url: str,
     meta = {
         "title":            result["title"],
         "thumbnail":        result["thumbnail"],
+        "is_live":          result["is_live"],
+        "live_status":      result["live_status"],
         "duration":         result["duration"],
         "duration_seconds": result["duration_seconds"],
         "extractor":        result["extractor"],
@@ -208,7 +215,8 @@ def ytdlp_get_qualities(url: str, base_url: str,
     raw_formats = [{"quality": q["quality"], "format": q["format"],
                     "ext": q.get("ext","mp4"), "url": q["url"],
                     "filesize": q.get("filesize",0)} for q in qualities]
-    cache_set(cache_key, (meta, raw_formats))
+    if not meta["is_live"]:
+        cache_set(cache_key, (meta, raw_formats))
 
     return meta, qualities
 
@@ -228,18 +236,22 @@ def yt_download():
     if not body or "url" not in body:
         return jsonify({"status": "error", "message": "'url' field is required in JSON body"}), 400
 
-    url      = body["url"].strip()
+    url      = str(body["url"]).strip()
+    if not validate_proxy_target(url):
+        return jsonify({"status": "error", "message": "URL must be a public HTTP(S) address."}), 400
     base_url = request.host_url.rstrip("/").replace("http://", "https://")
 
     # Age-gate cookies for known platforms
     parsed = urlparse(url)
     host   = (parsed.hostname or "").lower()
     cookies = {}
-    if "pornhub" in host or "phncdn" in host:
+    if any(host == d or host.endswith("." + d) for d in (
+        "pornhub.com", "pornhub.net", "pornhub.org", "pornhubpremium.com", "phncdn.com",
+    )):
         cookies = {"accessAgeDisclaimerPH": "1", "age_verified": "1", "platform": "pc"}
-    elif "xhamster" in host:
+    elif host == "xhamster.com" or host.endswith(".xhamster.com"):
         cookies = {"adc_ga_v2": "1", "is_adult_confirmed": "1", "xhamster-language": "en"}
-    elif "xvideos" in host or "xnxx" in host:
+    elif any(host == d or host.endswith("." + d) for d in ("xvideos.com", "xnxx.com")):
         cookies = {}
 
     try:
@@ -249,7 +261,7 @@ def yt_download():
             return jsonify({"status": "error", "message": "No streams found."}), 404
 
         best = next((q for q in qualities if q["format"] == "mp4"), qualities[0])
-        watch_url = f"{base_url}/yt/watch?url={url}"
+        watch_url = f"{base_url}/yt/watch?url={quote(url, safe='')}"
 
         return jsonify({
             "status": "success",
@@ -258,6 +270,8 @@ def yt_download():
                 "thumbnail":         meta["thumbnail"],
                 "duration":          meta["duration"],
                 "duration_seconds":  meta["duration_seconds"],
+                "is_live":           meta["is_live"],
+                "live_status":       meta["live_status"],
                 "extractor":         meta["extractor"],
                 "watch_url":         watch_url,
                 "qualities":         qualities,
@@ -279,6 +293,8 @@ def yt_watch():
     url = request.args.get("url", "").strip()
     if not url:
         return "<h2>Missing ?url= parameter</h2>", 400
+    if not validate_proxy_target(url):
+        return "<h2>URL must be a public HTTP(S) address.</h2>", 400
     try:
         base_url = request.host_url.rstrip("/").replace("http://", "https://")
         parsed   = urlparse(url)

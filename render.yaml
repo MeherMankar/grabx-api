@@ -8,7 +8,11 @@ services:
       - key: TERABOX_COOKIE
         sync: false        # set in Render dashboard: ndus=VALUE1,ndus=VALUE2
       - key: API_KEY
-        sync: false        # optional — leave blank for open access
+        sync: false        # required to use protected API routes
+      - key: REDIS_URL
+        sync: false        # required — shared cache, limits, and background jobs
+      - key: APP_ENV
+        value: production
       - key: CF_WORKER_URL
         sync: false        # optional — your CF Worker URL for zero-bandwidth streaming
       - key: PROXY_TOKEN_TTL_HOURS

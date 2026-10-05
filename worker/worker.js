@@ -15,7 +15,7 @@
 
 async function verifyToken(cdnUrl, tokenB64, expiryStr, apiKey) {
   apiKey = (apiKey || "").trim();
-  if (!apiKey) return true;
+  if (!apiKey) return false;
   const expiry = parseInt(expiryStr, 10);
   if (isNaN(expiry) || Date.now() / 1000 > expiry) return false;
   const msg  = `${expiry}:${cdnUrl}`;
@@ -298,12 +298,14 @@ async function handleRequest(request, apiKey, apiBase) {
       { status: 400, headers: { "Content-Type": "application/json" } });
   }
 
-  if (apiKey) {
-    const valid = await verifyToken(cdnUrl, tokenB64, expiryStr, apiKey);
-    if (!valid) {
-      return new Response(JSON.stringify({ status: "error", message: "Invalid or expired token." }),
-        { status: 403, headers: { "Content-Type": "application/json" } });
-    }
+  if (!apiKey) {
+    return new Response(JSON.stringify({ status: "error", message: "Worker API_KEY is not configured." }),
+      { status: 503, headers: { "Content-Type": "application/json" } });
+  }
+  const valid = await verifyToken(cdnUrl, tokenB64, expiryStr, apiKey);
+  if (!valid) {
+    return new Response(JSON.stringify({ status: "error", message: "Invalid or expired token." }),
+      { status: 403, headers: { "Content-Type": "application/json" } });
   }
 
   const isM3u8 = cdnUrl.includes(".m3u8");
@@ -448,7 +450,7 @@ export default {
         return new Response(JSON.stringify({
           status:   "ok",
           service:  "grabx-proxy worker",
-          auth:     apiKey ? "enabled" : "disabled",
+          auth:     apiKey ? "enabled" : "misconfigured (set API_KEY)",
           api_base: apiBase || "NOT SET — add API_BASE_URL variable in CF dashboard",
         }), { headers: { "Content-Type": "application/json" } });
       }

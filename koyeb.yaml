@@ -24,6 +24,11 @@ services:
       - name: API_KEY
         value: ""          # set in Koyeb dashboard
         secret: true
+      - name: REDIS_URL
+        value: ""          # required — set to a Redis-compatible service URL
+        secret: true
+      - name: APP_ENV
+        value: production
       - name: CF_WORKER_URL
         value: ""          # optional
       - name: PROXY_TOKEN_TTL_HOURS

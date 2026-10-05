@@ -97,7 +97,28 @@ def get_all_qualities(url: str) -> dict:
     cached = cache_get(cache_key)
     if cached:
         return cached
-    result = _extract_data(_fetch_page(url))
+    try:
+        result = _extract_data(_fetch_page(url))
+    except Exception as primary_error:
+        try:
+            from api.extractors.ytdlp import _ytdlp_extract
+            info = _ytdlp_extract(url)
+            result = {
+                "title": info["title"],
+                "thumbnail": info["thumbnail"],
+                "duration": info["duration"],
+                "duration_seconds": info["duration_seconds"],
+                "proxy_path": "/adult/proxy",
+                "streams": [{
+                    "src": fmt["url"],
+                    "label": f'{fmt["quality"]}p' if fmt["quality"].isdigit() else fmt["quality"],
+                    "type": "application/vnd.apple.mpegurl" if fmt.get("format") == "hls" else "video/mp4",
+                } for fmt in info["formats"]],
+            }
+        except Exception as fallback_error:
+            raise ValueError(
+                f"JAVtiful extraction and yt-dlp fallback failed: {fallback_error}"
+            ) from primary_error
     cache_set(cache_key, result)
     return result
 
@@ -120,14 +141,15 @@ def jav_download():
     try:
         base_url = request.host_url.rstrip("/")
         result   = get_all_qualities(body["url"].strip())
+        proxy_path = result.get("proxy_path", "/jav/proxy")
         qualities = []
         for i, s in enumerate(result["streams"]):
             src = s.get("src", "")
             ql  = str(_build_quality_label(s, i))
             qualities.append({
                 "quality": ql, "format": "mp4", "url": src,
-                "proxy_url":    make_proxy_url(base_url, "/jav/proxy", src, quality=ql),
-                "download_url": make_proxy_url(base_url, "/jav/proxy", src, extra="&dl=1", quality=ql),
+                "proxy_url":    make_proxy_url(base_url, proxy_path, src, quality=ql),
+                "download_url": make_proxy_url(base_url, proxy_path, src, extra="&dl=1", quality=ql),
             })
         if not qualities:
             return jsonify({"status": "error", "message": "No streams found."}), 404
@@ -157,14 +179,15 @@ def jav_watch():
     try:
         base_url = request.host_url.rstrip("/")
         result   = get_all_qualities(url)
+        proxy_path = result.get("proxy_path", "/jav/proxy")
         qualities = []
         for i, s in enumerate(result["streams"]):
             src = s.get("src", "")
             ql  = str(_build_quality_label(s, i))
             qualities.append({
                 "quality": ql, "format": "mp4", "url": src,
-                "proxy_url":    make_proxy_url(base_url, "/jav/proxy", src, quality=ql),
-                "download_url": make_proxy_url(base_url, "/jav/proxy", src, extra="&dl=1", quality=ql),
+                "proxy_url":    make_proxy_url(base_url, proxy_path, src, quality=ql),
+                "download_url": make_proxy_url(base_url, proxy_path, src, extra="&dl=1", quality=ql),
             })
         if not qualities:
             return "<h2>No streams found.</h2>", 404

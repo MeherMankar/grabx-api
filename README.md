@@ -37,6 +37,11 @@ A self-hosted Flask API that extracts direct download/stream links from multiple
 | **XHamster** | `POST /xh/download` | 144p–720p MP4, PRNG URL decryption |
 | **JAVtiful** | `POST /jav/download` | Free 720p MP4 stream |
 | **Any site** | `POST /yt/download` | yt-dlp — Twitter/X, Reddit, Twitch, Dailymotion, Vimeo, 1000+ sites |
+| **RedTube** | `POST /redtube/download` | yt-dlp adapter |
+| **YouPorn** | `POST /youporn/download` | yt-dlp adapter |
+| **Eporner** | `POST /eporner/download` | yt-dlp adapter |
+| **SpankBang** | `POST /spankbang/download` | yt-dlp adapter |
+| **PornTrex** | `POST /porntrex/download` | yt-dlp adapter; extractor availability depends on yt-dlp |
 
 All platforms have a `/watch` page for browser playback.
 
@@ -44,17 +49,20 @@ All platforms have a `/watch` page for browser playback.
 
 ## Features
 
-- **API key auth** — optional `X-API-Key` header guard, signed proxy tokens for streaming
+- **API key auth** — required for protected API routes, with signed proxy tokens for streaming
 - **yt-dlp fallback** — when datacenter IPs are blocked, yt-dlp extracts MP4 DDLs via residential proxy
 - **Rotating proxy pool** — `PROXY_URL` accepts 10+ proxies, picks randomly per request
-- **Response caching** — extraction results cached 2h to avoid hammering the proxy
+- **Redis-backed caching** — shared extraction cache with configurable TTL and authenticated cache clearing
+- **Background extraction** — Redis/RQ jobs for slow sites, with polling endpoints
+- **Abuse controls** — Redis-backed per-key/IP request limits and bounded violation logs
 - **Cloudflare Worker** — route all CDN streams through CF edge, zero server bandwidth
 - **DPI bypass** — `curl_cffi` Chrome TLS + HTTP/3/QUIC + Cloudflare DoH
 - **Terabox** — recursive folder support, video quality/resolution metadata, 20+ mirror domains
 - **XHamster** — proprietary PRNG URL decryption (matches yt-dlp extractor)
-- **HLS proxy** — manifest rewriting so `.m3u8` streams play anywhere without special headers
+- **Adaptive streaming** — HLS/live manifests and DASH manifest/segment proxying
+- **Player controls** — quality switching, download/copy links, live marker, and playback speed
 - **Auto-refresh** — expired PH CDN links are re-resolved automatically using the embedded viewkey
-- Modular codebase (`api/extractors/`), Docker-ready, single `.env` setup
+- Adapter-based site registry in `api/extractors/`, Docker-ready, single `.env` setup
 
 ---
 
@@ -114,8 +122,10 @@ TERABOX_COOKIE=ndus=YOUR_NDUS_VALUE
 # Multiple Terabox accounts (picked randomly per request)
 TERABOX_COOKIE=ndus=VALUE1,ndus=VALUE2
 
-# Recommended for production: protect download/proxy routes with a key
+# Required in production for protected download/proxy routes
 API_KEY=your_secret_key
+# Optional locally; required in production and for background jobs
+# REDIS_URL=redis://localhost:6379/0
 ```
 
 Run:
@@ -124,6 +134,8 @@ python api/index.py
 ```
 
 API available at `http://localhost:5000`.
+With Redis running and `REDIS_URL` configured, run `rq worker grabx` in a
+second terminal to process async extraction jobs.
 
 ---
 
@@ -143,10 +155,18 @@ API available at `http://localhost:5000`.
    | Name | Value |
    |------|-------|
    | `TERABOX_COOKIE` | `ndus=VALUE1,ndus=VALUE2` |
-   | `API_KEY` | `your_secret_key` *(recommended for production)* |
+   | `API_KEY` | `your_secret_key` *(required in production)* |
+   | `REDIS_URL` | Redis connection URL *(required)* |
+   | `APP_ENV` | `production` |
    | `CF_WORKER_URL` | `https://grabx-api.yourname.workers.dev` *(optional)* |
 
 4. Click **Deploy**
+
+For async jobs, run a separate background worker with the same environment:
+
+```bash
+rq worker grabx
+```
 
 > **Note:** Render free tier sleeps after 15 min of inactivity (30s cold start). Use UptimeRobot to ping `/health` every 5 min to keep it warm.
 
@@ -160,11 +180,16 @@ API available at `http://localhost:5000`.
    | Name | Value |
    |------|-------|
    | `TERABOX_COOKIE` | `ndus=VALUE1,ndus=VALUE2` |
-   | `API_KEY` | `your_secret_key` *(recommended for production)* |
+   | `API_KEY` | `your_secret_key` *(required in production)* |
+   | `REDIS_URL` | Redis connection URL *(required)* |
+   | `APP_ENV` | `production` |
    | `CF_WORKER_URL` | `https://grabx-api.yourname.workers.dev` *(optional)* |
    | `PROXY_URL` | `host:port:user:pass,...` *(optional — for PH/XV/XH MP4 DDLs)* |
 
 3. Click **Deploy** → you get `grabx-api-xxx.koyeb.app`
+
+Create a separate Koyeb worker service running `rq worker grabx` to process
+async jobs. Both services must use the same `REDIS_URL` and `API_KEY`.
 
 ---
 
@@ -211,6 +236,13 @@ Full docs at [`/docs`](https://grabx-api.onrender.com/docs) or see [docs.md](doc
 | POST | `/ph/download` | ✓ | PornHub → stream links |
 | GET | `/ph/watch/<viewkey>` | — | PH video player |
 | GET | `/ph/proxy` | token | PH CDN proxy |
+| POST | `/jobs` | ✓ | Queue an asynchronous extraction |
+| GET | `/jobs/<job_id>` | ✓ | Poll job status/result |
+| POST | `/redtube/download` | ✓ | RedTube extraction via yt-dlp |
+| POST | `/youporn/download` | ✓ | YouPorn extraction via yt-dlp |
+| POST | `/eporner/download` | ✓ | Eporner extraction via yt-dlp |
+| POST | `/spankbang/download` | ✓ | SpankBang extraction via yt-dlp |
+| POST | `/porntrex/download` | ✓ | PornTrex extraction via yt-dlp (if supported) |
 | POST | `/xv/download` | ✓ | Xvideos → stream links |
 | GET | `/xv/watch` | — | Xvideos player |
 | POST | `/xnxx/download` | ✓ | XNXX → stream links |

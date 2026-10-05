@@ -8,7 +8,8 @@ from urllib.parse import urlparse
 
 from api.utils import (
     make_proxy_url, verify_proxy_token, check_raw_key,
-    resolve_hls_uri, render_watch_page, adult_referer, validate_proxy_target,
+    rewrite_dash_manifest, resolve_hls_uri, render_watch_page,
+    adult_referer, validate_proxy_target,
 )
 
 bp = Blueprint("xvideos", __name__)
@@ -105,18 +106,23 @@ def extract_data(html: str, site_domain: str) -> dict:
 
 def build_qualities(data: dict, base_url: str, proxy_path: str, referer: str) -> list:
     qualities = []
-    mp4_map = [
-        ("1080", data.get("url_1080p")),
-        ("720",  data.get("url_720p")),
-        ("480",  data.get("url_480p") or data.get("url_high")),
-        ("360",  data.get("url_360p") or data.get("url_low") or data.get("url")),
-    ]
+    mp4_map = sorted(
+        ((key[4:-1], value) for key, value in data.items()
+         if re.fullmatch(r"url_\d+p", key) and value),
+        key=lambda item: int(item[0]),
+        reverse=True,
+    )
+    mp4_map.extend([
+        ("480", data.get("url_high")),
+        ("360", data.get("url_low") or data.get("url")),
+    ])
     seen = set()
     for ql, url in mp4_map:
         if url and url not in seen:
             seen.add(url)
+            fmt = data.get(f"format_{ql}", "mp4")
             qualities.append({
-                "quality": ql, "format": "mp4", "url": url,
+                "quality": ql, "format": fmt, "url": url,
                 "proxy_url":    make_proxy_url(base_url, proxy_path, url, quality=ql),
                 "download_url": make_proxy_url(base_url, proxy_path, url, extra="&dl=1", quality=ql),
             })
@@ -152,6 +158,36 @@ def build_qualities(data: dict, base_url: str, proxy_path: str, referer: str) ->
     return qualities
 
 
+def _ytdlp_fallback(url: str, site: str):
+    from api.extractors.ytdlp import _ytdlp_extract
+
+    result = _ytdlp_extract(url)
+    data = {"title": result["title"], "thumb": result["thumbnail"],
+            "duration": result["duration_seconds"]}
+    for fmt in result["formats"]:
+        quality = str(fmt.get("quality", ""))
+        if fmt.get("format") == "hls":
+            data.setdefault("url_hls", fmt["url"])
+        elif quality.isdigit():
+            data[f"url_{quality}p"] = fmt["url"]
+            if fmt.get("format") == "dash":
+                data[f"format_{quality}"] = "dash"
+        else:
+            data.setdefault("url", fmt["url"])
+    if (
+        not any(data.get(k) for k in ("url", "url_low", "url_high", "url_hls"))
+        and not any(k.startswith("url_") and v for k, v in data.items())
+    ):
+        raise ValueError(f"yt-dlp fallback returned no {site} streams.")
+    secs = int(data.get("duration", 0) or 0)
+    meta = {
+        "title": data["title"], "thumbnail": data["thumb"],
+        "duration": f"{secs // 60}:{secs % 60:02d}" if secs else "",
+        "duration_seconds": secs,
+    }
+    return meta, data
+
+
 def get_xv_qualities(url: str):
     from api.utils import cache_get, cache_set
     cache_key = f"xv:{url}"
@@ -164,13 +200,19 @@ def get_xv_qualities(url: str):
         parsed = urlparse(url)
     if not _XV_VALID_HOSTS_RE.match((parsed.hostname or "").lower()):
         raise ValueError(f"Not a supported Xvideos URL.")
-    session = _cffi_session()
-    html    = fetch_page(url, session)
-    data    = extract_data(html, "xvideos.com")
-    secs    = int(data.get("duration", 0) or 0)
-    result  = ({"title": data.get("title", "Unknown"), "thumbnail": data.get("thumb", ""),
-                "duration": f"{secs // 60}:{secs % 60:02d}" if secs else "",
-                "duration_seconds": secs}, data)
+    try:
+        session = _cffi_session()
+        html    = fetch_page(url, session)
+        data    = extract_data(html, "xvideos.com")
+        secs    = int(data.get("duration", 0) or 0)
+        result  = ({"title": data.get("title", "Unknown"), "thumbnail": data.get("thumb", ""),
+                    "duration": f"{secs // 60}:{secs % 60:02d}" if secs else "",
+                    "duration_seconds": secs}, data)
+    except Exception as primary_error:
+        try:
+            result = _ytdlp_fallback(url, "Xvideos")
+        except Exception as fallback_error:
+            raise ValueError(f"Xvideos extraction and yt-dlp fallback failed: {fallback_error}") from primary_error
     cache_set(cache_key, result)
     return result
 
@@ -187,13 +229,19 @@ def get_xnxx_qualities(url: str):
         parsed = urlparse(url)
     if not _XNXX_VALID_HOSTS_RE.match((parsed.hostname or "").lower()):
         raise ValueError(f"Not a supported XNXX URL.")
-    session = _cffi_session(_XNXX_AGE_COOKIES, [".xnxx.com"])
-    html    = fetch_page(url, session)
-    data    = extract_data(html, "xnxx.com")
-    secs    = int(data.get("duration", 0) or 0)
-    result  = ({"title": data.get("title", "Unknown"), "thumbnail": data.get("thumb", ""),
-                "duration": f"{secs // 60}:{secs % 60:02d}" if secs else "",
-                "duration_seconds": secs}, data)
+    try:
+        session = _cffi_session(_XNXX_AGE_COOKIES, [".xnxx.com"])
+        html    = fetch_page(url, session)
+        data    = extract_data(html, "xnxx.com")
+        secs    = int(data.get("duration", 0) or 0)
+        result  = ({"title": data.get("title", "Unknown"), "thumbnail": data.get("thumb", ""),
+                    "duration": f"{secs // 60}:{secs % 60:02d}" if secs else "",
+                    "duration_seconds": secs}, data)
+    except Exception as primary_error:
+        try:
+            result = _ytdlp_fallback(url, "XNXX")
+        except Exception as fallback_error:
+            raise ValueError(f"XNXX extraction and yt-dlp fallback failed: {fallback_error}") from primary_error
     cache_set(cache_key, result)
     return result
 
@@ -279,16 +327,46 @@ def xnxx_watch():
 
 @bp.route("/adult/proxy")
 def adult_proxy():
+    dash_segment = request.args.get("dash") == "1"
+    dash_root = request.args.get("root", "").strip()
     cdn_url = request.args.get("url", "").strip()
+    if dash_segment:
+        template = request.args.get("template", "").strip()
+        if not template or not dash_root:
+            return jsonify({"status": "error", "message": "Invalid DASH segment URL."}), 400
+        substitutions = {
+            "Number": request.args.get("n", ""),
+            "Time": request.args.get("t", ""),
+            "RepresentationID": request.args.get("r", ""),
+            "Bandwidth": request.args.get("b", ""),
+        }
+        for variable, value in substitutions.items():
+            if value:
+                template = re.sub(
+                    rf"\${variable}(?:%0\d+d)?\$",
+                    lambda _: value,
+                    template,
+                )
+        cdn_url = template
     if not cdn_url:
         return jsonify({"status": "error", "message": "'url' required"}), 400
     if not validate_proxy_target(cdn_url):
         return jsonify({"status": "error", "message": "Proxy target must be a public HTTP(S) URL."}), 400
-    if not verify_proxy_token(cdn_url) and not check_raw_key():
+    if dash_segment:
+        root_parts = urlparse(dash_root)
+        target_parts = urlparse(cdn_url)
+        if (
+            not validate_proxy_target(dash_root)
+            or not verify_proxy_token(dash_root)
+            or (root_parts.scheme, root_parts.netloc) != (target_parts.scheme, target_parts.netloc)
+        ):
+            return jsonify({"status": "error", "message": "Invalid DASH manifest token or target."}), 403
+    elif not verify_proxy_token(cdn_url) and not check_raw_key():
         return jsonify({"status": "error", "message": "Access denied."}), 403
 
     download_mode = request.args.get("dl", "0") == "1"
     is_m3u8 = ".m3u8" in cdn_url
+    is_mpd = ".mpd" in cdn_url.lower()
     is_ts   = cdn_url.endswith(".ts") or ".ts?" in cdn_url
 
     try:
@@ -305,6 +383,15 @@ def adult_proxy():
                                stream=True)
         if upstream.status_code not in (200, 206):
             return jsonify({"status": "error", "message": f"CDN returned HTTP {upstream.status_code}."}), upstream.status_code
+
+        if is_mpd:
+            rewritten = rewrite_dash_manifest(
+                upstream.text, cdn_url, request.host_url.rstrip("/"), "/adult/proxy"
+            )
+            return Response(
+                rewritten, status=200, content_type="application/dash+xml; charset=utf-8",
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+            )
 
         if is_m3u8:
             manifest = upstream.text.strip()

@@ -279,14 +279,16 @@ def ph_download():
         vk = meta.get("viewkey", "")
         for q in all_qualities:
             ql = str(q.get("quality", ""))
-            q["proxy_url"]    = make_proxy_url(base_url, "/ph/proxy", q["url"], viewkey=vk, quality=ql)
-            q["download_url"] = make_proxy_url(base_url, "/ph/proxy", q["url"], extra="&dl=1", viewkey=vk, quality=ql)
+            path = "/adult/proxy" if q.get("format") == "dash" else "/ph/proxy"
+            q["proxy_url"]    = make_proxy_url(base_url, path, q["url"], viewkey=vk, quality=ql)
+            q["download_url"] = make_proxy_url(base_url, path, q["url"], extra="&dl=1", viewkey=vk, quality=ql)
         mp4s  = [q for q in all_qualities if q["format"] == "mp4"]
         best  = mp4s[0] if mp4s else all_qualities[0]
         best_ql  = str(best.get("quality", ""))
         best_fmt = best.get("format", "mp4")
-        best_proxy    = make_proxy_url(base_url, "/ph/proxy", best["url"], viewkey=vk, quality=best_ql)
-        best_download = make_proxy_url(base_url, "/ph/proxy", best["url"], extra="&dl=1", viewkey=vk, quality=best_ql)
+        best_path = "/adult/proxy" if best_fmt == "dash" else "/ph/proxy"
+        best_proxy    = make_proxy_url(base_url, best_path, best["url"], viewkey=vk, quality=best_ql)
+        best_download = make_proxy_url(base_url, best_path, best["url"], extra="&dl=1", viewkey=vk, quality=best_ql)
         watch_url = f"{base_url}/ph/watch/{vk}" if vk else ""
         return jsonify({
             "status": "success",
@@ -321,11 +323,12 @@ def ph_watch(viewkey: str):
     for q in all_qualities:
         ql  = str(q.get("quality", ""))
         fmt = q.get("format", "mp4")
+        path = "/adult/proxy" if fmt == "dash" else "/ph/proxy"
         all_opts.append({
             "quality":      ql,
             "format":       fmt,
-            "proxy_url":    make_proxy_url(base_url, "/ph/proxy", q["url"], viewkey=viewkey, quality=ql),
-            "download_url": make_proxy_url(base_url, "/ph/proxy", q["url"], extra="&dl=1", viewkey=viewkey, quality=ql),
+            "proxy_url":    make_proxy_url(base_url, path, q["url"], viewkey=viewkey, quality=ql),
+            "download_url": make_proxy_url(base_url, path, q["url"], extra="&dl=1", viewkey=viewkey, quality=ql),
         })
     mp4_opts = [o for o in all_opts if o["format"] == "mp4"]
     sorted_opts = mp4_opts + [o for o in all_opts if o["format"] == "hls"]

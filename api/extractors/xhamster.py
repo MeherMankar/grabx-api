@@ -182,9 +182,33 @@ def get_all_qualities(url: str) -> dict:
     host = (parsed.hostname or "").lower()
     if not _XH_VALID_HOSTS_RE.match(host):
         raise ValueError(f"Not a supported XHamster URL (host: {host!r}).")
-    session = _cffi_session()
-    html    = fetch_page(url, session)
-    result  = extract_data(html)
+    try:
+        session = _cffi_session()
+        html    = fetch_page(url, session)
+        result  = extract_data(html)
+    except Exception as primary_error:
+        try:
+            from api.extractors.ytdlp import _ytdlp_extract
+            result_info = _ytdlp_extract(
+                url,
+                cookies={"adc_ga_v2": "1", "is_adult_confirmed": "1", "xhamster-language": "en"},
+            )
+            fallback_qualities = [{
+                "quality": fmt["quality"],
+                "format": fmt.get("format", "mp4"),
+                "url": fmt["url"],
+            } for fmt in result_info["formats"]]
+            result = {
+                "title": result_info["title"],
+                "thumbnail": result_info["thumbnail"],
+                "duration": result_info["duration"],
+                "duration_seconds": result_info["duration_seconds"],
+                "qualities": fallback_qualities,
+            }
+        except Exception as fallback_error:
+            raise ValueError(
+                f"XHamster extraction and yt-dlp fallback failed: {fallback_error}"
+            ) from primary_error
     cache_set(cache_key, result)
     return result
 

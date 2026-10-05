@@ -9,11 +9,15 @@ proxy routes that rewrite HLS manifests.
 import hmac
 import hashlib
 import base64
+import html as html_lib
 import ipaddress
 import os
 import re
 import socket
 import time as _time
+import json
+import threading
+import xml.etree.ElementTree as ET
 from urllib.parse import quote, urlparse
 
 from flask import request
@@ -104,9 +108,12 @@ def validate_proxy_target(cdn_url: str) -> bool:
     """Reject internal/loopback/invalid targets before proxying a user-supplied URL."""
     try:
         parsed = urlparse(cdn_url)
+        port = parsed.port
     except ValueError:
         return False
     if parsed.scheme not in ("http", "https"):
+        return False
+    if parsed.username is not None or parsed.password is not None:
         return False
     host = (parsed.hostname or "").lower()
     if not host:
@@ -123,7 +130,8 @@ def validate_proxy_target(cdn_url: str) -> bool:
         pass
 
     try:
-        infos = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
+        infos = socket.getaddrinfo(host, port or (443 if parsed.scheme == "https" else 80),
+                                   type=socket.SOCK_STREAM)
     except socket.gaierror:
         return False
     for _, _, _, _, sockaddr in infos:
@@ -211,6 +219,55 @@ def make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
     return f"{proxy_base}{path}?url={enc}{vk_part}{q_part}{src_part}{extra}"
 
 
+def make_dash_proxy_url(base_url: str, path: str, root_url: str, media_url: str) -> str:
+    """Build a proxy template URL carrying a token scoped to its signed MPD."""
+    encoded_root = quote(root_url, safe="")
+    encoded_media = quote(media_url, safe="")
+    token = sign_url(root_url)
+    params = f"dash=1&root={encoded_root}&template={encoded_media}"
+    if token:
+        params += f"&{token}"
+    variable_params = {
+        "Number": "n", "Time": "t", "RepresentationID": "r", "Bandwidth": "b",
+    }
+    pattern = re.compile(r"\$(Number|Time|RepresentationID|Bandwidth)(%0\d+d)?\$")
+    for variable, format_spec in set(pattern.findall(media_url)):
+        params += f"&{variable_params[variable]}=${variable}{format_spec}$"
+    base_url = base_url.replace("http://", "https://")
+    return f"{base_url.rstrip('/')}{path}?{params}"
+
+
+def rewrite_dash_manifest(text: str, root_url: str, base_url: str, path: str) -> str:
+    """Rewrite DASH segment references through the authenticated proxy."""
+    root = ET.fromstring(text)
+    parsed_base = urlparse(root_url)
+    root_base = root_url[:root_url.rfind("/") + 1]
+    variables = re.compile(r"\$(?:Number|Time|RepresentationID|Bandwidth)(?:%0\d+d)?\$")
+
+    def rewrite_element(element, current_base: str, current_parsed):
+        tag = element.tag.rsplit("}", 1)[-1]
+        if tag == "BaseURL" and element.text:
+            element.text = resolve_hls_uri(element.text.strip(), current_base, current_parsed)
+            current_parsed = urlparse(element.text)
+            current_base = element.text if element.text.endswith("/") else \
+                element.text[:element.text.rfind("/") + 1]
+        if tag in {"SegmentTemplate", "SegmentURL", "Initialization", "RepresentationIndex"}:
+            for attr in ("media", "initialization", "sourceURL", "index"):
+                uri = element.attrib.get(attr)
+                if not uri:
+                    continue
+                absolute = resolve_hls_uri(uri, current_base, current_parsed)
+                if variables.search(absolute):
+                    element.attrib[attr] = make_dash_proxy_url(base_url, path, root_url, absolute)
+                else:
+                    element.attrib[attr] = make_proxy_url(base_url, path, absolute)
+        for child in element:
+            rewrite_element(child, current_base, current_parsed)
+
+    rewrite_element(root, root_base, parsed_base)
+    return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
+
 # ---------------------------------------------------------------------------
 # CDN Referer detection (adult sites)
 # ---------------------------------------------------------------------------
@@ -224,6 +281,10 @@ _ADULT_CDN_REFERERS = [
 
 def adult_referer(cdn_url: str) -> str:
     host = (urlparse(cdn_url).hostname or "").lower()
+    if re.search(r"(?:^|\.)jav\.si$|javtiful", host, re.I):
+        return "https://javtiful.com/"
+    if "phncdn" in host or "pornhub" in host:
+        return "https://www.pornhub.com/"
     for pat, ref in _ADULT_CDN_REFERERS:
         if pat.search(host):
             return ref
@@ -250,7 +311,7 @@ def resolve_hls_uri(uri: str, base_dir: str, parsed_base) -> str:
 
 def html_attr(url: str) -> str:
     """Escape a URL for safe use inside an HTML attribute value."""
-    return str(url or "").replace("&", "&amp;").replace('"', "&quot;")
+    return html_lib.escape(str(url or ""), quote=True)
 
 
 def render_watch_page(meta: dict, qualities: list):
@@ -258,9 +319,10 @@ def render_watch_page(meta: dict, qualities: list):
     Render the HLS.js video player HTML for any platform.
     qualities must be a list of dicts with: quality, format, proxy_url, download_url.
     """
-    title     = meta.get("title", "Video")
-    thumbnail = meta.get("thumbnail", "")
-    duration  = meta.get("duration", "")
+    title     = html_lib.escape(str(meta.get("title", "Video")))
+    thumbnail = html_attr(meta.get("thumbnail", ""))
+    duration  = html_lib.escape(str(meta.get("duration", "")))
+    is_live   = bool(meta.get("is_live"))
 
     sorted_opts = sorted(
         qualities,
@@ -269,17 +331,17 @@ def render_watch_page(meta: dict, qualities: list):
 
     options_html = "\n".join(
         f'<option value="{html_attr(o.get("proxy_url",""))}" '
-        f'data-fmt="{o["format"]}" '
+        f'data-fmt="{html_attr(o["format"])}" '
         f'data-dl="{html_attr(o.get("download_url",""))}">'
-        f'{o["quality"]}{"p" if o["quality"].isdigit() else ""} {o["format"].upper()}'
+        f'{html_lib.escape(str(o["quality"]))}{"p" if str(o["quality"]).isdigit() else ""} {html_lib.escape(str(o["format"]).upper())}'
         f'</option>'
         for o in sorted_opts
     )
 
     best     = sorted_opts[0]
     # Use the raw URL directly in JS strings — & only needs escaping in HTML attributes
-    best_dl  = best.get("download_url", "")
-    best_fmt = best.get("format", "mp4")
+    best_dl  = json.dumps(best.get("download_url", "")).replace("<", "\\u003c")
+    best_fmt = json.dumps(best.get("format", "mp4")).replace("<", "\\u003c")
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -311,7 +373,7 @@ def render_watch_page(meta: dict, qualities: list):
 </head>
 <body>
   <div class="container">
-    <h1>{title}</h1>
+    <h1>{title}{' <span style="color:#f55;font-size:.72em">LIVE</span>' if is_live else ''}</h1>
     <div class="player-wrap">
       <video id="player" controls preload="metadata" poster="{thumbnail}">
         Your browser does not support HTML5 video.
@@ -319,6 +381,11 @@ def render_watch_page(meta: dict, qualities: list):
     </div>
     <div class="controls">
       <select id="qualitySelect">{options_html}</select>
+      <select id="playbackRate" aria-label="Playback speed">
+        <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+        <option value="1" selected>1×</option><option value="1.25">1.25×</option>
+        <option value="1.5">1.5×</option><option value="2">2×</option>
+      </select>
       <button id="dlBtn" class="btn btn-dl">&#8595; Download</button>
       <a id="directLink" class="btn" href="{html_attr(best.get('proxy_url',''))}" target="_blank" style="background:#333;color:#eee;font-size:.8rem">&#8599; Open stream</a>
     </div>
@@ -326,22 +393,28 @@ def render_watch_page(meta: dict, qualities: list):
     <p class="note">💡 Right-click <b>Open stream</b> → "Save link as" to download. For HLS: open in VLC.</p>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+  <script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
   <script>
     const video = document.getElementById('player');
     const sel   = document.getElementById('qualitySelect');
+    const rate  = document.getElementById('playbackRate');
     const dlBtn = document.getElementById('dlBtn');
     const directLink = document.getElementById('directLink');
+    rate.addEventListener('change', () => {{ video.playbackRate = Number(rate.value); }});
     let hls     = null;
-    let currentDlUrl = '{best_dl}';
-    let currentFmt   = '{best_fmt}';
+    let dash    = null;
+    let currentDlUrl = {best_dl};
+    let currentFmt   = {best_fmt};
 
     function loadSrc(streamUrl, fmt, dlUrl) {{
       const isHls = fmt === 'hls' || streamUrl.includes('.m3u8');
+      const isDash = fmt === 'dash' || streamUrl.includes('.mpd');
       currentDlUrl = dlUrl; currentFmt = fmt;
       directLink.href = streamUrl;
       // Update button label based on format
-      dlBtn.textContent = isHls ? '📋 Copy Stream URL' : '↓ Download';
+      dlBtn.textContent = (isHls || isDash) ? '📋 Copy Stream URL' : '↓ Download';
       if (hls) {{ hls.destroy(); hls = null; }}
+      if (dash) {{ dash.reset(); dash = null; }}
       if (isHls) {{
         if (Hls.isSupported()) {{
           hls = new Hls({{ enableWorker: true }});
@@ -351,13 +424,16 @@ def render_watch_page(meta: dict, qualities: list):
         }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
           video.src = streamUrl; video.play().catch(() => {{}});
         }}
+      }} else if (isDash && window.dashjs) {{
+        dash = dashjs.MediaPlayer().create();
+        dash.initialize(video, streamUrl, true);
       }} else {{
         video.src = streamUrl; video.load();
       }}
     }}
 
     dlBtn.addEventListener('click', async function() {{
-      if (currentFmt === 'hls') {{
+      if (currentFmt === 'hls' || currentFmt === 'dash') {{
         // HLS can't be downloaded as a single file in the browser.
         // Copy the stream URL to clipboard and show a message.
         try {{
@@ -402,22 +478,41 @@ def render_watch_page(meta: dict, qualities: list):
 # ---------------------------------------------------------------------------
 # In-memory response cache with TTL
 # ---------------------------------------------------------------------------
-# Caches extraction results (qualities list + meta) so repeated requests for
-# the same URL don't hit the proxy or source site again for CACHE_TTL seconds.
-# Simple thread-safe dict — works fine for single-worker Gunicorn deployments.
+# Redis is shared by app workers and RQ workers. Without REDIS_URL, the cache
+# remains process-local for development; production startup requires Redis.
 # ---------------------------------------------------------------------------
 
-import threading
 import time as _time_mod
 
 _cache_lock  = threading.Lock()
 _cache_store: dict = {}  # key -> {"data": ..., "expires": float}
+_memory_rate_limits: dict = {}
+_abuse_events: list = []
 
 CACHE_TTL: int = int(os.environ.get("CACHE_TTL_SECONDS", str(2 * 3600)))  # default 2 hours
+REDIS_URL: str = os.environ.get("REDIS_URL", "").strip()
+_redis = None
+_redis_lock = threading.Lock()
+
+
+def get_redis():
+    """Return the configured Redis client, or None for local development."""
+    global _redis
+    if not REDIS_URL:
+        return None
+    with _redis_lock:
+        if _redis is None:
+            from redis import Redis
+            _redis = Redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=3)
+        return _redis
 
 
 def cache_get(key: str):
     """Return cached value or None if missing/expired."""
+    redis = get_redis()
+    if redis:
+        value = redis.get(f"grabx:cache:{key}")
+        return json.loads(value) if value else None
     with _cache_lock:
         entry = _cache_store.get(key)
         if entry and _time_mod.time() < entry["expires"]:
@@ -428,9 +523,15 @@ def cache_get(key: str):
 
 
 def cache_set(key: str, data, ttl: int = None):
-    """Store value with TTL. Uses CACHE_TTL if ttl not specified."""
+    """Store with an optional site-specific TTL, then the global TTL fallback."""
     if ttl is None:
-        ttl = CACHE_TTL
+        site = key.partition(":")[0].upper()
+        ttl = int(os.environ.get(f"CACHE_TTL_{site}_SECONDS", str(CACHE_TTL)))
+    ttl = max(1, ttl)
+    redis = get_redis()
+    if redis:
+        redis.setex(f"grabx:cache:{key}", ttl, json.dumps(data))
+        return
     with _cache_lock:
         _cache_store[key] = {
             "data":    data,
@@ -446,8 +547,70 @@ def cache_set(key: str, data, ttl: int = None):
 
 def cache_stats() -> dict:
     """Return cache stats for /health endpoint."""
+    redis = get_redis()
+    if redis:
+        keys = list(redis.scan_iter(match="grabx:cache:*", count=100))
+        return {"total": len(keys), "active": len(keys), "ttl_seconds": CACHE_TTL,
+                "backend": "redis"}
     with _cache_lock:
         now = _time_mod.time()
         total   = len(_cache_store)
         active  = sum(1 for v in _cache_store.values() if v["expires"] > now)
-    return {"total": total, "active": active, "ttl_seconds": CACHE_TTL}
+    return {"total": total, "active": active, "ttl_seconds": CACHE_TTL,
+            "backend": "memory"}
+
+
+def cache_clear() -> int:
+    """Clear extraction cache entries and return the number removed."""
+    redis = get_redis()
+    if redis:
+        keys = list(redis.scan_iter(match="grabx:cache:*", count=100))
+        return redis.delete(*keys) if keys else 0
+    with _cache_lock:
+        count = len(_cache_store)
+        _cache_store.clear()
+    return count
+
+
+def enforce_rate_limit(identity: str, limit: int, window_seconds: int = 60) -> tuple[bool, int]:
+    """Increment a fixed-window request counter; return (allowed, retry_after)."""
+    now = int(_time_mod.time())
+    bucket = now // window_seconds
+    key = f"grabx:rate:{identity}:{bucket}"
+    redis = get_redis()
+    if redis:
+        pipe = redis.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, window_seconds + 1)
+        count, _ = pipe.execute()
+    else:
+        with _cache_lock:
+            expired = [k for k, value in _memory_rate_limits.items() if value[1] <= now]
+            for k in expired:
+                del _memory_rate_limits[k]
+            count, _ = _memory_rate_limits.get(key, (0, now + window_seconds))
+            count += 1
+            _memory_rate_limits[key] = (count, now + window_seconds)
+    return count <= limit, max(1, window_seconds - now % window_seconds)
+
+
+def log_abuse_event(event: dict) -> None:
+    """Retain a bounded, short-lived record of rate-limit violations."""
+    redis = get_redis()
+    if redis:
+        redis.lpush("grabx:abuse", json.dumps(event))
+        redis.ltrim("grabx:abuse", 0, 499)
+        redis.expire("grabx:abuse", 7 * 24 * 60 * 60)
+        return
+    with _cache_lock:
+        _abuse_events.insert(0, event)
+        del _abuse_events[500:]
+
+
+def get_abuse_events(limit: int = 100) -> list:
+    """Return recent rate-limit violations for authenticated diagnostics."""
+    redis = get_redis()
+    if redis:
+        return [json.loads(item) for item in redis.lrange("grabx:abuse", 0, limit - 1)]
+    with _cache_lock:
+        return list(_abuse_events[:limit])

@@ -6,3 +6,5 @@ python-dotenv==1.0.1
 gunicorn==22.0.0
 curl_cffi==0.16.3
 yt-dlp==2025.1.15
+redis==5.2.1
+rq==2.1.0
