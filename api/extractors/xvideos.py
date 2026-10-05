@@ -159,56 +159,65 @@ def build_qualities(data: dict, base_url: str, proxy_path: str, referer: str) ->
 
 
 def _request_adult_stream(session, url: str, headers: dict):
-    """Try direct HTTP/3, negotiated HTTP, then a configured proxy on HTTP 403."""
-    upstream = None
-    try:
-        upstream = session.get(
-            url, headers=headers, allow_redirects=True, timeout=30,
-            http_version=3, doh_url="https://1.1.1.1/dns-query", stream=True,
-        )
-    except Exception as exc:
-        from flask import current_app
-        current_app.logger.warning(
-            "HTTP/3 CDN request failed (%s); retrying with negotiated HTTP version.",
-            type(exc).__name__,
-        )
-    else:
-        if upstream.status_code in (200, 206):
-            return upstream
-        http3_status = upstream.status_code
-        upstream.close()
-        from flask import current_app
-        current_app.logger.warning(
-            "HTTP/3 CDN request returned %s; retrying with negotiated HTTP version.",
-            http3_status,
-        )
-
-    upstream = session.get(
-        url, headers=headers, allow_redirects=True, timeout=30, stream=True,
-    )
-    if upstream.status_code != 403:
-        return upstream
-
-    from api.utils import get_proxy
+    """Try the original direct HTTP/3 route before configured proxy fallbacks."""
+    from api.utils import get_proxy, get_proxy_for_url, _parse_proxy_list
+    pinned_proxy = get_proxy_for_url(url)
     proxy = get_proxy()
-    if not proxy:
-        return upstream
+    if pinned_proxy:
+        alternate_proxies = [
+            candidate for candidate in _parse_proxy_list()
+            if candidate != pinned_proxy
+        ]
+        proxy = alternate_proxies[0] if alternate_proxies else ""
+    attempts = [
+        ("HTTP/3", {
+            "http_version": 3,
+            "doh_url": "https://1.1.1.1/dns-query",
+        }),
+        ("negotiated HTTP", {}),
+    ]
+    if pinned_proxy:
+        attempts.append(("IP-matched proxy", {
+            "proxies": {"http": pinned_proxy, "https": pinned_proxy},
+        }))
+    if proxy and proxy != pinned_proxy:
+        attempts.append(("configured proxy", {
+            "proxies": {"http": proxy, "https": proxy},
+        }))
 
-    from flask import current_app
-    current_app.logger.warning("CDN returned 403 directly; retrying through configured proxy.")
-    try:
-        proxied = session.get(
-            url, headers=headers, allow_redirects=True, timeout=30, stream=True,
-            proxies={"http": proxy, "https": proxy},
-        )
-        upstream.close()
-        return proxied
-    except Exception as exc:
+    last_response = None
+    last_error = None
+    for label, options in attempts:
+        try:
+            upstream = session.get(
+                url, headers=headers, allow_redirects=True, timeout=30,
+                stream=True, **options,
+            )
+        except Exception as exc:
+            last_error = exc
+            from flask import current_app
+            current_app.logger.warning(
+                "%s CDN request failed (%s).", label, type(exc).__name__,
+            )
+            continue
+        if upstream.status_code in (200, 206):
+            if last_response is not None:
+                last_response.close()
+            return upstream
+        if last_response is not None:
+            last_response.close()
+        last_response = upstream
+        from flask import current_app
         current_app.logger.warning(
-            "CDN proxy retry failed (%s); returning the direct CDN response.",
-            type(exc).__name__,
+            "%s CDN request returned %s; trying the next route.",
+            label, upstream.status_code,
         )
-        return upstream
+
+    if last_response is not None:
+        return last_response
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No CDN request route was available.")
 
 
 def _ytdlp_fallback(url: str, site: str):

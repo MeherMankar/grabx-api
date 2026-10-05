@@ -80,6 +80,22 @@ def get_proxy() -> str:
     import random
     return random.choice(proxies)
 
+
+def get_proxy_for_url(cdn_url: str) -> str:
+    """Select the configured proxy whose address is embedded in an XHamster CDN URL."""
+    parsed = urlparse(cdn_url)
+    marker = re.search(
+        r"(?:^|/)data=(\d{1,3}(?:\.\d{1,3}){3})-dvp(?:/|$)",
+        parsed.path,
+    )
+    if not marker:
+        return ""
+    expected_host = marker.group(1)
+    for proxy in _parse_proxy_list():
+        if urlparse(proxy).hostname == expected_host:
+            return proxy
+    return ""
+
 DESKTOP_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -133,6 +149,8 @@ def validate_proxy_target(cdn_url: str) -> bool:
         infos = socket.getaddrinfo(host, port or (443 if parsed.scheme == "https" else 80),
                                    type=socket.SOCK_STREAM)
     except socket.gaierror:
+        if host.endswith(".xhcdn.com") and get_proxy_for_url(cdn_url):
+            return True
         return False
     for _, _, _, _, sockaddr in infos:
         addr = sockaddr[0]
@@ -194,6 +212,19 @@ def check_raw_key() -> bool:
 # Proxy URL builder
 # ---------------------------------------------------------------------------
 
+def _normalize_proxy_base_url(base_url: str) -> str:
+    """Use HTTPS for deployed hosts while keeping local loopback URLs on HTTP."""
+    parsed = urlparse(base_url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "http" and host != "localhost" and not host.endswith(".localhost"):
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                return parsed._replace(scheme="https").geturl()
+        except ValueError:
+            return parsed._replace(scheme="https").geturl()
+    return base_url
+
+
 def make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
                    viewkey: str = "", quality: str = "", src_domain: str = "") -> str:
     """
@@ -201,8 +232,7 @@ def make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
     Routes /ph/proxy, /jav/proxy through CF Worker when configured.
     /proxy (Terabox) and /adult/proxy always stay on the API server (IP-locked CDN).
     """
-    # Force https — Koyeb/Render may pass http in request.host_url via proxy headers
-    base_url = base_url.replace("http://", "https://")
+    base_url = _normalize_proxy_base_url(base_url)
 
     if CF_WORKER_URL and path in ("/ph/proxy", "/jav/proxy"):
         proxy_base = CF_WORKER_URL
@@ -233,7 +263,7 @@ def make_dash_proxy_url(base_url: str, path: str, root_url: str, media_url: str)
     pattern = re.compile(r"\$(Number|Time|RepresentationID|Bandwidth)(%0\d+d)?\$")
     for variable, format_spec in set(pattern.findall(media_url)):
         params += f"&{variable_params[variable]}=${variable}{format_spec}$"
-    base_url = base_url.replace("http://", "https://")
+    base_url = _normalize_proxy_base_url(base_url)
     return f"{base_url.rstrip('/')}{path}?{params}"
 
 
@@ -275,6 +305,7 @@ def rewrite_dash_manifest(text: str, root_url: str, base_url: str, path: str) ->
 _ADULT_CDN_REFERERS = [
     (re.compile(r'xvideos-cdn\.com', re.I), "https://www.xvideos.com/"),
     (re.compile(r'xnxx-cdn\.com',    re.I), "https://www.xnxx.com/"),
+    (re.compile(r'xhcdn\.com',       re.I), "https://xhamster.com/"),
     (re.compile(r'xhmscdn|xhstorage|xhamster', re.I), "https://xhamster.com/"),
 ]
 

@@ -1,4 +1,5 @@
 import os
+import socket
 import unittest
 import xml.etree.ElementTree as ET
 from unittest.mock import patch
@@ -192,6 +193,131 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(session.calls[0][1]["http_version"], 3)
         self.assertNotIn("http_version", session.calls[1][1])
 
+    def test_xhamster_stream_uses_proxy_matching_embedded_ip(self):
+        class FakeResponse:
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+            def close(self):
+                pass
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                if len(self.calls) < 3:
+                    raise RuntimeError("direct route unavailable")
+                return FakeResponse(206)
+
+        proxy = "http://user:password@38.154.185.97:6370"
+        session = FakeSession()
+        stream_url = "https://video-h.xhcdn.com/key=x/data=38.154.185.97-dvp/720p.mp4"
+        with (
+            patch("api.utils._parse_proxy_list", return_value=[proxy]),
+            index.app.app_context(),
+        ):
+            response = _request_adult_stream(session, stream_url, {})
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(len(session.calls), 3)
+        self.assertEqual(session.calls[0][1]["http_version"], 3)
+        self.assertEqual(session.calls[2][1]["proxies"], {
+            "http": proxy,
+            "https": proxy,
+        })
+
+    def test_xhamster_stream_preserves_direct_http3_as_first_attempt(self):
+        class FakeResponse:
+            status_code = 206
+
+            def close(self):
+                pass
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, **kwargs):
+                self.calls.append(kwargs)
+                return FakeResponse()
+
+        session = FakeSession()
+        stream_url = "https://video-h.xhcdn.com/key=x/data=38.154.185.97-dvp/720p.mp4"
+        with (
+            patch("api.utils.get_proxy_for_url", return_value="http://user:pass@38.154.185.97:6370"),
+            patch("api.utils.get_proxy", return_value="http://user:pass@38.154.185.98:6370"),
+            patch("api.utils._parse_proxy_list", return_value=[
+                "http://user:pass@38.154.185.97:6370",
+                "http://user:pass@38.154.185.98:6370",
+            ]),
+        ):
+            response = _request_adult_stream(session, stream_url, {})
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(session.calls[0]["http_version"], 3)
+        self.assertNotIn("proxies", session.calls[0])
+
+    def test_xhamster_stream_retries_after_ip_matched_proxy_403(self):
+        class FakeResponse:
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+            def close(self):
+                pass
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) in (1, 3):
+                    return FakeResponse(403)
+                if "http_version" in kwargs:
+                    raise RuntimeError("CDN hostname cannot resolve directly")
+                if "proxies" in kwargs:
+                    return FakeResponse(206)
+                raise RuntimeError("CDN hostname cannot resolve directly")
+
+        pinned = "http://user:pass@38.154.185.97:6370"
+        alternate = "http://user:pass@38.154.185.98:6370"
+        session = FakeSession()
+        stream_url = "https://video-h.xhcdn.com/key=x/data=38.154.185.97-dvp/720p.mp4"
+        with (
+            patch("api.utils.get_proxy_for_url", return_value=pinned),
+            patch("api.utils._parse_proxy_list", return_value=[pinned, alternate]),
+            patch("api.utils.get_proxy", return_value=pinned),
+            index.app.app_context(),
+        ):
+            response = _request_adult_stream(session, stream_url, {})
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(len(session.calls), 4)
+        self.assertEqual(session.calls[0]["http_version"], 3)
+        self.assertEqual(session.calls[2]["proxies"]["https"], pinned)
+        self.assertEqual(session.calls[3]["proxies"]["https"], alternate)
+
+    def test_unresolved_xhamster_cdn_requires_matching_proxy(self):
+        stream_url = "https://video-h.xhcdn.com/key=x/data=38.154.185.97-dvp/720p.mp4"
+        with (
+            patch("api.utils.socket.getaddrinfo", side_effect=socket.gaierror),
+            patch("api.utils._parse_proxy_list", return_value=[]),
+        ):
+            self.assertFalse(utils.validate_proxy_target(stream_url))
+        with (
+            patch("api.utils.socket.getaddrinfo", side_effect=socket.gaierror),
+            patch("api.utils._parse_proxy_list", return_value=[
+                "http://user:password@38.154.185.97:6370",
+            ]),
+        ):
+            self.assertTrue(utils.validate_proxy_target(stream_url))
+
+    def test_xhamster_cdn_uses_xhamster_referer(self):
+        self.assertEqual(
+            utils.adult_referer("https://video-h.xhcdn.com/video.mp4"),
+            "https://xhamster.com/",
+        )
+
     def test_adult_stream_retries_403_through_configured_proxy(self):
         class FakeResponse:
             def __init__(self, status_code):
@@ -228,7 +354,7 @@ class FeatureTests(unittest.TestCase):
         })
         self.assertTrue(session.responses[1].closed)
 
-    def test_xhamster_extractor_uses_versioned_short_cache(self):
+    def test_xhamster_extractor_does_not_cache_ip_bound_stream_urls(self):
         result = {
             "title": "Example",
             "thumbnail": "",
@@ -237,18 +363,15 @@ class FeatureTests(unittest.TestCase):
             "qualities": [{"quality": "720", "format": "mp4", "url": "https://cdn.example/video.mp4"}],
         }
         with (
-            patch("api.utils.cache_get", return_value=None),
             patch("api.extractors.xhamster.fetch_page", return_value="<html></html>"),
             patch("api.extractors.xhamster.extract_data", return_value=result),
+            patch("api.utils.cache_get") as cache_get,
             patch("api.utils.cache_set") as cache_set,
         ):
             actual = get_all_qualities("https://xhamster19.com/videos/example")
         self.assertEqual(actual, result)
-        cache_set.assert_called_once_with(
-            "xh:v2:https://xhamster19.com/videos/example",
-            result,
-            ttl=300,
-        )
+        cache_get.assert_not_called()
+        cache_set.assert_not_called()
 
     def test_private_proxy_targets_are_rejected(self):
         self.assertFalse(utils.validate_proxy_target("http://127.0.0.1:8080/"))
@@ -273,6 +396,28 @@ class FeatureTests(unittest.TestCase):
         self.assertIn("$Number%05d$", media)
         self.assertIn("_t=", media)
         self.assertTrue(template.attrib["initialization"].startswith("https://api.example/adult/proxy?url="))
+
+    def test_proxy_url_builder_keeps_http_for_local_loopback(self):
+        proxy = utils.make_proxy_url(
+            "http://127.0.0.1:5000", "/adult/proxy", "https://cdn.example/video.mp4",
+        )
+        dash_proxy = utils.make_dash_proxy_url(
+            "http://localhost:5000", "/adult/proxy",
+            "https://cdn.example/manifest.mpd", "https://cdn.example/seg-$Number$.m4s",
+        )
+        self.assertTrue(proxy.startswith("http://127.0.0.1:5000/"))
+        self.assertTrue(dash_proxy.startswith("http://localhost:5000/"))
+
+    def test_proxy_url_builder_uses_https_for_deployed_http_base(self):
+        proxy = utils.make_proxy_url(
+            "http://api.example.com", "/adult/proxy", "https://cdn.example/video.mp4",
+        )
+        dash_proxy = utils.make_dash_proxy_url(
+            "http://api.example.com", "/adult/proxy",
+            "https://cdn.example/manifest.mpd", "https://cdn.example/seg-$Number$.m4s",
+        )
+        self.assertTrue(proxy.startswith("https://api.example.com/"))
+        self.assertTrue(dash_proxy.startswith("https://api.example.com/"))
 
     def test_protected_routes_fail_closed_without_key(self):
         index.API_KEY = ""
