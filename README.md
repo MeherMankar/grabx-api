@@ -114,7 +114,7 @@ TERABOX_COOKIE=ndus=YOUR_NDUS_VALUE
 # Multiple Terabox accounts (picked randomly per request)
 TERABOX_COOKIE=ndus=VALUE1,ndus=VALUE2
 
-# Optional: protect the API with a key
+# Recommended for production: protect download/proxy routes with a key
 API_KEY=your_secret_key
 ```
 
@@ -143,7 +143,7 @@ API available at `http://localhost:5000`.
    | Name | Value |
    |------|-------|
    | `TERABOX_COOKIE` | `ndus=VALUE1,ndus=VALUE2` |
-   | `API_KEY` | `your_secret_key` *(optional)* |
+   | `API_KEY` | `your_secret_key` *(recommended for production)* |
    | `CF_WORKER_URL` | `https://grabx-api.yourname.workers.dev` *(optional)* |
 
 4. Click **Deploy**
@@ -160,7 +160,7 @@ API available at `http://localhost:5000`.
    | Name | Value |
    |------|-------|
    | `TERABOX_COOKIE` | `ndus=VALUE1,ndus=VALUE2` |
-   | `API_KEY` | `your_secret_key` *(optional)* |
+   | `API_KEY` | `your_secret_key` *(recommended for production)* |
    | `CF_WORKER_URL` | `https://grabx-api.yourname.workers.dev` *(optional)* |
    | `PROXY_URL` | `host:port:user:pass,...` *(optional — for PH/XV/XH MP4 DDLs)* |
 

@@ -10,7 +10,7 @@ from urllib.parse import urlparse, parse_qs
 
 from api.utils import (
     MOBILE_UA, DESKTOP_UA,
-    make_proxy_url, verify_proxy_token, check_raw_key,
+    make_proxy_url, verify_proxy_token, check_raw_key, validate_proxy_target,
 )
 
 bp = Blueprint("terabox", __name__)
@@ -341,6 +341,8 @@ def proxy():
     dlink = request.args.get("url", "").strip()
     if not dlink:
         return jsonify({"status": "error", "message": "'url' query param required"}), 400
+    if not validate_proxy_target(dlink):
+        return jsonify({"status": "error", "message": "Proxy target must be a public HTTP(S) URL."}), 400
     if not verify_proxy_token(dlink) and not check_raw_key():
         return jsonify({"status": "error", "message": "Access denied."}), 403
     try:

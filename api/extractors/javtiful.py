@@ -8,6 +8,7 @@ from urllib.parse import urlparse, quote
 
 from api.utils import (
     DESKTOP_UA, make_proxy_url, verify_proxy_token, check_raw_key, render_watch_page,
+    validate_proxy_target,
 )
 
 bp = Blueprint("javtiful", __name__)
@@ -178,6 +179,8 @@ def jav_proxy():
     cdn_url = request.args.get("url", "").strip()
     if not cdn_url:
         return jsonify({"status": "error", "message": "'url' query param required"}), 400
+    if not validate_proxy_target(cdn_url):
+        return jsonify({"status": "error", "message": "Proxy target must be a public HTTP(S) URL."}), 400
     if not verify_proxy_token(cdn_url) and not check_raw_key():
         return jsonify({"status": "error", "message": "Access denied."}), 403
 

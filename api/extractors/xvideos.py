@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 from api.utils import (
     make_proxy_url, verify_proxy_token, check_raw_key,
-    resolve_hls_uri, render_watch_page, adult_referer,
+    resolve_hls_uri, render_watch_page, adult_referer, validate_proxy_target,
 )
 
 bp = Blueprint("xvideos", __name__)
@@ -282,6 +282,8 @@ def adult_proxy():
     cdn_url = request.args.get("url", "").strip()
     if not cdn_url:
         return jsonify({"status": "error", "message": "'url' required"}), 400
+    if not validate_proxy_target(cdn_url):
+        return jsonify({"status": "error", "message": "Proxy target must be a public HTTP(S) URL."}), 400
     if not verify_proxy_token(cdn_url) and not check_raw_key():
         return jsonify({"status": "error", "message": "Access denied."}), 403
 

@@ -49,16 +49,26 @@ app.register_blueprint(ytdlp_bp)
 
 _PUBLIC_ROUTES   = {"/", "/docs", "/health", "/debug/headers"}
 _PUBLIC_PREFIXES = (
-    "/ph/watch/", "/ph/proxy", "/proxy", "/adult/proxy",
-    "/xv/watch",  "/xnxx/watch", "/xh/watch",
-    "/jav/proxy", "/jav/watch",
-    "/yt/watch",
+    "/ph/watch/", "/xv/watch", "/xnxx/watch", "/xh/watch",
+    "/jav/watch", "/yt/watch",
+)
+_PROTECTED_PREFIXES = (
+    "/download", "/proxy", "/ph/proxy", "/adult/proxy",
+    "/jav/proxy", "/ph/download", "/xv/download", "/xnxx/download",
+    "/xh/download", "/jav/download", "/yt/download",
 )
 
 
 @app.before_request
 def _check_api_key():
     if not API_KEY:
+        if request.path in _PUBLIC_ROUTES or request.path.startswith(_PUBLIC_PREFIXES):
+            return
+        if request.path.startswith(_PROTECTED_PREFIXES):
+            return jsonify({
+                "status": "error",
+                "message": "API_KEY is required for download/proxy routes. Set API_KEY in the environment.",
+            }), 401
         return
     if request.path in _PUBLIC_ROUTES:
         return

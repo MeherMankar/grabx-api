@@ -23,7 +23,7 @@ curl -X POST https://grabx-api.onrender.com/ph/download \
 ## Authentication
 
 Set `API_KEY` (or `GRABX_API_KEY`) as an environment variable to protect the API.  
-Leave unset for open/public access.
+For production deployments, keep this enabled; without it, download/proxy routes are rejected.
 
 ### Passing the key
 

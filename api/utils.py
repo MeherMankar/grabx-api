@@ -9,8 +9,10 @@ proxy routes that rewrite HLS manifests.
 import hmac
 import hashlib
 import base64
+import ipaddress
 import os
 import re
+import socket
 import time as _time
 from urllib.parse import quote, urlparse
 
@@ -98,10 +100,50 @@ def sign_url(cdn_url: str) -> str:
     return f"_t={token}&_e={expiry}"
 
 
+def validate_proxy_target(cdn_url: str) -> bool:
+    """Reject internal/loopback/invalid targets before proxying a user-supplied URL."""
+    try:
+        parsed = urlparse(cdn_url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        return not (
+            ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+            or ip.is_reserved or ip.is_unspecified
+        )
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    for _, _, _, _, sockaddr in infos:
+        addr = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if (
+            ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+            or ip.is_reserved or ip.is_unspecified
+        ):
+            return False
+    return True
+
+
 def verify_proxy_token(cdn_url: str) -> bool:
-    """True if request has a valid signed token for cdn_url, or API_KEY unset."""
+    """True if request has a valid signed token for cdn_url, requiring API_KEY to be configured."""
     if not API_KEY:
-        return True
+        return False
     t   = request.args.get("_t", "")
     exp = request.args.get("_e", "")
     if not t or not exp:
@@ -121,7 +163,7 @@ def verify_proxy_token(cdn_url: str) -> bool:
 def check_raw_key() -> bool:
     """True if the request carries the raw API key in any accepted location."""
     if not API_KEY:
-        return True
+        return False
     auth  = request.headers.get("Authorization", "")
     bearer = auth.removeprefix("Bearer ").strip() if auth.lower().startswith("bearer ") else ""
     key = (
