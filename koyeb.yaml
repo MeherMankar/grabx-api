@@ -33,3 +33,29 @@ services:
         value: ""          # optional
       - name: PROXY_TOKEN_TTL_HOURS
         value: "24"
+  - name: grabx-worker
+    type: worker
+    git:
+      repository: github.com/MeherMankar/grabx-api
+      branch: master
+    docker:
+      dockerfile: Dockerfile
+      command:
+        - rq
+        - worker
+        - grabx
+    instance_type: free
+    regions:
+      - was
+    env:
+      - name: API_KEY
+        value: ""          # use the same value as grabx-api
+        secret: true
+      - name: REDIS_URL
+        value: ""          # use the same Redis URL as grabx-api
+        secret: true
+      - name: APP_ENV
+        value: production
+      - name: PROXY_URL
+        value: ""          # optional — use the same proxy pool as grabx-api
+        secret: true

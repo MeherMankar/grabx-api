@@ -1,5 +1,11 @@
 """Redis-backed asynchronous yt-dlp extraction jobs."""
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from rq import Queue
 
 from api.utils import get_redis

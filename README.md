@@ -188,8 +188,10 @@ rq worker grabx
 
 3. Click **Deploy** → you get `grabx-api-xxx.koyeb.app`
 
-Create a separate Koyeb worker service running `rq worker grabx` to process
-async jobs. Both services must use the same `REDIS_URL` and `API_KEY`.
+The Koyeb manifest also defines a `grabx-worker` service. Configure its `API_KEY`
+and `REDIS_URL` with the same values as the web service; copy `PROXY_URL` too if
+the API relies on the proxy pool for yt-dlp extractions. The worker runs
+`rq worker grabx` to process async jobs.
 
 ---
 

@@ -432,8 +432,8 @@ APP_ENV        = production
 CF_WORKER_URL  = https://grabx-api.yourname.workers.dev  (optional)
 ```
 
-4. Run `rq worker grabx` as a separate background worker with the same Redis
-   and API key configuration.
+4. Run `rq worker grabx` as a separate background worker with the same
+   `REDIS_URL` and `API_KEY` (and `PROXY_URL` if required for site access).
 5. Deploy. Port 8000 is used by gunicorn (set in Dockerfile).
 
 ---
