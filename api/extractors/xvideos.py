@@ -159,7 +159,8 @@ def build_qualities(data: dict, base_url: str, proxy_path: str, referer: str) ->
 
 
 def _request_adult_stream(session, url: str, headers: dict):
-    """Try HTTP/3 first, then retry with curl's negotiated HTTP version."""
+    """Try direct HTTP/3, negotiated HTTP, then a configured proxy on HTTP 403."""
+    upstream = None
     try:
         upstream = session.get(
             url, headers=headers, allow_redirects=True, timeout=30,
@@ -174,16 +175,40 @@ def _request_adult_stream(session, url: str, headers: dict):
     else:
         if upstream.status_code in (200, 206):
             return upstream
+        http3_status = upstream.status_code
         upstream.close()
         from flask import current_app
         current_app.logger.warning(
             "HTTP/3 CDN request returned %s; retrying with negotiated HTTP version.",
-            upstream.status_code,
+            http3_status,
         )
 
-    return session.get(
+    upstream = session.get(
         url, headers=headers, allow_redirects=True, timeout=30, stream=True,
     )
+    if upstream.status_code != 403:
+        return upstream
+
+    from api.utils import get_proxy
+    proxy = get_proxy()
+    if not proxy:
+        return upstream
+
+    from flask import current_app
+    current_app.logger.warning("CDN returned 403 directly; retrying through configured proxy.")
+    try:
+        proxied = session.get(
+            url, headers=headers, allow_redirects=True, timeout=30, stream=True,
+            proxies={"http": proxy, "https": proxy},
+        )
+        upstream.close()
+        return proxied
+    except Exception as exc:
+        current_app.logger.warning(
+            "CDN proxy retry failed (%s); returning the direct CDN response.",
+            type(exc).__name__,
+        )
+        return upstream
 
 
 def _ytdlp_fallback(url: str, site: str):

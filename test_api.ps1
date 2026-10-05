@@ -40,7 +40,7 @@ try {
     $StatusUrl = "$BaseUrl/jobs/$([uri]::EscapeDataString($Job.job_id))"
     $JobStatus = $null
     $StatusUnavailable = $false
-    for ($Attempt = 0; $Attempt -lt 20; $Attempt++) {
+    for ($Attempt = 0; $Attempt -lt 40; $Attempt++) {
         Start-Sleep -Seconds 3
         try {
             $JobStatus = Invoke-RestMethod -Uri $StatusUrl `
@@ -59,6 +59,15 @@ try {
             break
         }
         Write-Host "Job status: $($JobStatus.status)"
+        if ($JobStatus.queue) {
+            $WorkerSummary = @($JobStatus.queue.workers | ForEach-Object {
+                "$($_.name) [$($_.state)]"
+            }) -join ", "
+            if (-not $WorkerSummary) {
+                $WorkerSummary = "none registered"
+            }
+            Write-Host "Queue depth: $($JobStatus.queue.queued_jobs); workers: $WorkerSummary"
+        }
         if ($JobStatus.status -in @("finished", "failed")) {
             break
         }
@@ -71,7 +80,7 @@ try {
     } elseif ($StatusUnavailable) {
         Write-Warning "The job was queued, but its status could not be read. Check the Koyeb API logs for the /jobs/$($Job.job_id) request and the worker logs."
     } else {
-        Write-Warning "Job is still queued/running after 60 seconds. Check the Koyeb RQ worker."
+        Write-Warning "Job is still queued/running after 120 seconds. Use the worker and queue details above to diagnose the Koyeb grabx-worker service."
     }
 } catch {
     Write-Error "API test failed: $($_.Exception.Message)"

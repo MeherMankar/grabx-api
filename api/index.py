@@ -246,6 +246,16 @@ def get_job(job_id):
             response["result"] = job.result
         elif state == "failed":
             response["message"] = "Extraction job failed."
+        elif state == "queued":
+            from api.jobs import extraction_queue, queue_workers
+            queue = extraction_queue()
+            response["queue"] = {
+                "queued_jobs": queue.count,
+                "workers": [
+                    {"name": worker.name, "state": worker.get_state()}
+                    for worker in queue_workers(queue)
+                ],
+            }
         return jsonify(response)
     except Exception as exc:
         from rq.exceptions import NoSuchJobError

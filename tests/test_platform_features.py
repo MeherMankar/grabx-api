@@ -8,6 +8,7 @@ os.environ["API_KEY"] = ""
 os.environ["REDIS_URL"] = ""
 
 from api import index, jobs, utils
+from api.extractors.xhamster import get_all_qualities
 from api.extractors.xvideos import _request_adult_stream
 
 
@@ -130,8 +131,15 @@ class FeatureTests(unittest.TestCase):
             "id": "test-id",
             "get_status": lambda self, refresh: "queued",
         })()
+        worker = type("FakeWorker", (), {
+            "name": "grabx-worker-1",
+            "get_state": lambda self: "idle",
+        })()
+        queue = type("FakeQueue", (), {"count": 2})()
         with (
             patch("api.jobs.get_job_redis", return_value=self.redis),
+            patch("api.jobs.extraction_queue", return_value=queue),
+            patch("api.jobs.queue_workers", return_value=[worker]),
             patch("rq.job.Job.fetch", return_value=job) as fetch,
         ):
             response = index.app.test_client().get(
@@ -139,6 +147,10 @@ class FeatureTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["status"], "queued")
+        self.assertEqual(response.get_json()["queue"], {
+            "queued_jobs": 2,
+            "workers": [{"name": "grabx-worker-1", "state": "idle"}],
+        })
         fetch.assert_called_once_with("test-id", connection=self.redis)
 
     def test_job_creation_reports_missing_worker(self):
@@ -179,6 +191,64 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 2)
         self.assertEqual(session.calls[0][1]["http_version"], 3)
         self.assertNotIn("http_version", session.calls[1][1])
+
+    def test_adult_stream_retries_403_through_configured_proxy(self):
+        class FakeResponse:
+            def __init__(self, status_code):
+                self.status_code = status_code
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = []
+                self.responses = [
+                    FakeResponse(403),
+                    FakeResponse(403),
+                    FakeResponse(206),
+                ]
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return self.responses[len(self.calls) - 1]
+
+        session = FakeSession()
+        with (
+            index.app.app_context(),
+            patch("api.utils.get_proxy", return_value="http://proxy.example:8080"),
+        ):
+            response = _request_adult_stream(session, "https://cdn.example/video.mp4", {})
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(len(session.calls), 3)
+        self.assertEqual(session.calls[2][1]["proxies"], {
+            "http": "http://proxy.example:8080",
+            "https": "http://proxy.example:8080",
+        })
+        self.assertTrue(session.responses[1].closed)
+
+    def test_xhamster_extractor_uses_versioned_short_cache(self):
+        result = {
+            "title": "Example",
+            "thumbnail": "",
+            "duration": "",
+            "duration_seconds": 0,
+            "qualities": [{"quality": "720", "format": "mp4", "url": "https://cdn.example/video.mp4"}],
+        }
+        with (
+            patch("api.utils.cache_get", return_value=None),
+            patch("api.extractors.xhamster.fetch_page", return_value="<html></html>"),
+            patch("api.extractors.xhamster.extract_data", return_value=result),
+            patch("api.utils.cache_set") as cache_set,
+        ):
+            actual = get_all_qualities("https://xhamster19.com/videos/example")
+        self.assertEqual(actual, result)
+        cache_set.assert_called_once_with(
+            "xh:v2:https://xhamster19.com/videos/example",
+            result,
+            ttl=300,
+        )
 
     def test_private_proxy_targets_are_rejected(self):
         self.assertFalse(utils.validate_proxy_target("http://127.0.0.1:8080/"))

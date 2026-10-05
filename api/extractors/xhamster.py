@@ -171,7 +171,7 @@ def extract_data(html: str) -> dict:
 
 def get_all_qualities(url: str) -> dict:
     from api.utils import cache_get, cache_set
-    cache_key = f"xh:{url}"
+    cache_key = f"xh:v2:{url}"
     cached = cache_get(cache_key)
     if cached:
         return cached
@@ -209,7 +209,7 @@ def get_all_qualities(url: str) -> dict:
             raise ValueError(
                 f"XHamster extraction and yt-dlp fallback failed: {fallback_error}"
             ) from primary_error
-    cache_set(cache_key, result)
+    cache_set(cache_key, result, ttl=300)
     return result
 
 # ---------------------------------------------------------------------------

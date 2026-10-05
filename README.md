@@ -194,7 +194,11 @@ the API relies on the proxy pool for yt-dlp extractions. The worker runs
 `rq worker grabx` to process async jobs. Make sure the worker service itself is
 created and running; deploying only the web service does not start it. The API
 returns HTTP 503 from `POST /jobs` with a worker setup message when no worker is
-registered for the `grabx` queue.
+registered for the `grabx` queue. Queued job status responses include queue
+depth and worker states to help diagnose a worker that is registered but not
+consuming jobs. The XHamster stream proxy retries HTTP 403 responses through
+`PROXY_URL` when configured, and refreshed extraction URLs are cached for five
+minutes.
 
 ---
 
