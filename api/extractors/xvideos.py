@@ -158,6 +158,34 @@ def build_qualities(data: dict, base_url: str, proxy_path: str, referer: str) ->
     return qualities
 
 
+def _request_adult_stream(session, url: str, headers: dict):
+    """Try HTTP/3 first, then retry with curl's negotiated HTTP version."""
+    try:
+        upstream = session.get(
+            url, headers=headers, allow_redirects=True, timeout=30,
+            http_version=3, doh_url="https://1.1.1.1/dns-query", stream=True,
+        )
+    except Exception as exc:
+        from flask import current_app
+        current_app.logger.warning(
+            "HTTP/3 CDN request failed (%s); retrying with negotiated HTTP version.",
+            type(exc).__name__,
+        )
+    else:
+        if upstream.status_code in (200, 206):
+            return upstream
+        upstream.close()
+        from flask import current_app
+        current_app.logger.warning(
+            "HTTP/3 CDN request returned %s; retrying with negotiated HTTP version.",
+            upstream.status_code,
+        )
+
+    return session.get(
+        url, headers=headers, allow_redirects=True, timeout=30, stream=True,
+    )
+
+
 def _ytdlp_fallback(url: str, site: str):
     from api.extractors.ytdlp import _ytdlp_extract
 
@@ -378,9 +406,7 @@ def adult_proxy():
         if rng := request.headers.get("Range"):
             headers["Range"] = rng
 
-        upstream = session.get(cdn_url, headers=headers, allow_redirects=True,
-                               timeout=30, http_version=3, doh_url="https://1.1.1.1/dns-query",
-                               stream=True)
+        upstream = _request_adult_stream(session, cdn_url, headers)
         if upstream.status_code not in (200, 206):
             return jsonify({"status": "error", "message": f"CDN returned HTTP {upstream.status_code}."}), upstream.status_code
 

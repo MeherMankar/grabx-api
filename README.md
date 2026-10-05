@@ -191,7 +191,10 @@ rq worker grabx
 The Koyeb manifest also defines a `grabx-worker` service. Configure its `API_KEY`
 and `REDIS_URL` with the same values as the web service; copy `PROXY_URL` too if
 the API relies on the proxy pool for yt-dlp extractions. The worker runs
-`rq worker grabx` to process async jobs.
+`rq worker grabx` to process async jobs. Make sure the worker service itself is
+created and running; deploying only the web service does not start it. The API
+returns HTTP 503 from `POST /jobs` with a worker setup message when no worker is
+registered for the `grabx` queue.
 
 ---
 

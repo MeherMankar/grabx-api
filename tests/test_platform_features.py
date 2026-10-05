@@ -8,6 +8,7 @@ os.environ["API_KEY"] = ""
 os.environ["REDIS_URL"] = ""
 
 from api import index, jobs, utils
+from api.extractors.xvideos import _request_adult_stream
 
 
 class FakeRedis:
@@ -139,6 +140,45 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["status"], "queued")
         fetch.assert_called_once_with("test-id", connection=self.redis)
+
+    def test_job_creation_reports_missing_worker(self):
+        index.API_KEY = "test-key"
+        queue = type("FakeQueue", (), {
+            "enqueue": lambda *args, **kwargs: self.fail("must not enqueue without a worker"),
+        })()
+        with (
+            patch("api.index.validate_proxy_target", return_value=True),
+            patch("api.jobs.extraction_queue", return_value=queue),
+            patch("api.jobs.queue_workers", return_value=[]),
+        ):
+            response = index.app.test_client().post(
+                "/jobs", json={"url": "https://example.com/video"},
+                headers={"X-API-Key": "test-key"},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("No worker is listening", response.get_json()["message"])
+
+    def test_adult_stream_retries_without_http3_after_transport_error(self):
+        class FakeResponse:
+            status_code = 206
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                if len(self.calls) == 1:
+                    raise RuntimeError("HTTP/3 unavailable")
+                return FakeResponse()
+
+        session = FakeSession()
+        with index.app.app_context():
+            response = _request_adult_stream(session, "https://cdn.example/video.mp4", {})
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(session.calls[0][1]["http_version"], 3)
+        self.assertNotIn("http_version", session.calls[1][1])
 
     def test_private_proxy_targets_are_rejected(self):
         self.assertFalse(utils.validate_proxy_target("http://127.0.0.1:8080/"))

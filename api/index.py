@@ -201,7 +201,7 @@ def health():
 
 @app.route("/jobs", methods=["POST"])
 def create_job():
-    from api.jobs import extract_job, extraction_queue
+    from api.jobs import extract_job, extraction_queue, queue_workers
 
     body = request.get_json(silent=True) or {}
     url = str(body.get("url") or "").strip()
@@ -210,7 +210,13 @@ def create_job():
     if not validate_proxy_target(url):
         return jsonify({"status": "error", "message": "URL must be a public HTTP(S) address."}), 400
     try:
-        job = extraction_queue().enqueue(
+        queue = extraction_queue()
+        if not queue_workers(queue):
+            return jsonify({
+                "status": "error",
+                "message": "No worker is listening on the 'grabx' queue. Start the grabx-worker service, then retry.",
+            }), 503
+        job = queue.enqueue(
             extract_job, url, request.host_url.rstrip("/").replace("http://", "https://"),
             job_timeout=180, result_ttl=3600, failure_ttl=86400,
         )

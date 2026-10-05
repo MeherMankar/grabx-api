@@ -9,7 +9,7 @@ except ImportError:
     pass
 
 from redis import Redis
-from rq import Queue
+from rq import Queue, Worker
 
 from api import utils
 
@@ -57,3 +57,8 @@ def extraction_queue() -> Queue:
     if redis is None:
         raise RuntimeError("REDIS_URL is required for asynchronous extraction jobs.")
     return Queue("grabx", connection=redis, default_timeout=180)
+
+
+def queue_workers(queue: Queue) -> list:
+    """Return workers currently registered for the extraction queue."""
+    return Worker.all(queue=queue)
