@@ -7,7 +7,7 @@ os.environ["APP_ENV"] = "development"
 os.environ["API_KEY"] = ""
 os.environ["REDIS_URL"] = ""
 
-from api import index, utils
+from api import index, jobs, utils
 
 
 class FakeRedis:
@@ -75,8 +75,10 @@ class FeatureTests(unittest.TestCase):
         self.old_api_key = utils.API_KEY
         self.old_index_key = index.API_KEY
         self.old_rate_limit = index._RATE_LIMIT
+        self.old_job_redis = jobs._job_redis
         utils.REDIS_URL = ""
         utils._redis = None
+        jobs._job_redis = None
         utils._cache_store.clear()
         utils._memory_rate_limits.clear()
         utils._abuse_events.clear()
@@ -88,6 +90,7 @@ class FeatureTests(unittest.TestCase):
         utils.API_KEY = self.old_api_key
         index.API_KEY = self.old_index_key
         index._RATE_LIMIT = self.old_rate_limit
+        jobs._job_redis = self.old_job_redis
         utils._cache_store.clear()
         utils._memory_rate_limits.clear()
         utils._abuse_events.clear()
@@ -108,6 +111,34 @@ class FeatureTests(unittest.TestCase):
 
         utils.log_abuse_event({"path": "/yt/download"})
         self.assertEqual(utils.get_abuse_events()[0]["path"], "/yt/download")
+
+    def test_rq_uses_binary_safe_redis_connection(self):
+        utils.REDIS_URL = "redis://fake"
+        with patch("api.jobs.Redis.from_url", return_value=self.redis) as from_url:
+            queue = jobs.extraction_queue()
+        from_url.assert_called_once_with(
+            "redis://fake",
+            decode_responses=False,
+            socket_connect_timeout=3,
+        )
+        self.assertIs(queue.connection, self.redis)
+
+    def test_job_status_fetch_uses_binary_safe_redis_connection(self):
+        index.API_KEY = "test-key"
+        job = type("FakeJob", (), {
+            "id": "test-id",
+            "get_status": lambda self, refresh: "queued",
+        })()
+        with (
+            patch("api.jobs.get_job_redis", return_value=self.redis),
+            patch("rq.job.Job.fetch", return_value=job) as fetch,
+        ):
+            response = index.app.test_client().get(
+                "/jobs/test-id", headers={"X-API-Key": "test-key"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "queued")
+        fetch.assert_called_once_with("test-id", connection=self.redis)
 
     def test_private_proxy_targets_are_rejected(self):
         self.assertFalse(utils.validate_proxy_target("http://127.0.0.1:8080/"))

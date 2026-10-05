@@ -226,10 +226,11 @@ def create_job():
 
 @app.route("/jobs/<job_id>", methods=["GET"])
 def get_job(job_id):
+    from api.jobs import get_job_redis
     from rq.job import Job
 
     try:
-        redis = get_redis()
+        redis = get_job_redis()
         if redis is None:
             return jsonify({"status": "error", "message": "REDIS_URL is required for jobs."}), 503
         job = Job.fetch(job_id, connection=redis)
