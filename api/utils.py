@@ -695,10 +695,18 @@ def cache_get(key: str):
 
 
 def cache_set(key: str, data, ttl: int = None):
-    """Store with an optional site-specific TTL, then the global TTL fallback."""
+    """Store with an optional site-specific TTL, then the global TTL fallback.
+    
+    Sites with time-limited CDN URLs use shorter TTLs:
+      XH (XHamster): 15 min — CDN URLs expire in ~2h but we refresh early
+      PH (PornHub):  15 min — same
+    """
     if ttl is None:
         site = key.partition(":")[0].upper()
-        ttl = int(os.environ.get(f"CACHE_TTL_{site}_SECONDS", str(CACHE_TTL)))
+        # Sites with signed/expiring CDN URLs get shorter cache TTL
+        _short_ttl_sites = {"XH": 900, "PH": 900}  # 15 minutes
+        default_ttl = _short_ttl_sites.get(site, CACHE_TTL)
+        ttl = int(os.environ.get(f"CACHE_TTL_{site}_SECONDS", str(default_ttl)))
     ttl = max(1, ttl)
     redis = get_redis()
     if redis:
