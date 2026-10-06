@@ -3,14 +3,23 @@
 XHamster encrypts MP4 source URLs in window.initials using a seeded PRNG XOR cipher.
 Format: [1-byte algo_id][4-byte LE seed][XOR-encrypted payload]
 Algorithm IDs 1-7 match yt-dlp's XHamster extractor exactly.
+
+Streaming strategy:
+  /xh/watch and /xh/download return proxy_url pointing to /xh/stream.
+  /xh/stream re-fetches the XH page LIVE on every stream request, gets a fresh
+  CDN URL signed for the current outbound IP, then streams it immediately.
+  Page fetch + CDN stream happen in the same process/OS interface → IP always matches.
 """
 import re
 import json
 
-from flask import Blueprint, request, jsonify
-from urllib.parse import urlparse
+from flask import Blueprint, request, jsonify, Response, stream_with_context
+from urllib.parse import urlparse, quote
 
-from api.utils import make_proxy_url, render_watch_page
+from api.utils import (
+    make_proxy_url, render_watch_page, verify_proxy_token,
+    check_raw_key, adult_referer, sign_url, _normalize_proxy_base_url,
+)
 from api.extractors.xvideos import fetch_page  # reuse curl_cffi fetch
 
 bp = Blueprint("xhamster", __name__)
@@ -134,22 +143,16 @@ def extract_data(html: str) -> dict:
                 qualities.append({"quality": ql, "format": "mp4", "url": decrypted})
 
     for codec in ("h264", "av1"):
-        entry = sources.get("hls", {}).get(codec, {})
+        entry   = sources.get("hls", {}).get(codec, {})
         hls_hex = (entry.get("url") or "").strip() if isinstance(entry, dict) else ""
         if hls_hex:
             decrypted = decrypt_url(hls_hex)
             if decrypted.startswith("http"):
                 if "_TPL_" in decrypted:
-                    # XHamster HLS URL is a template — expand into per-quality manifests.
-                    # The URL contains multi=WxH:label:,... which lists all variants.
-                    # e.g. multi=256x144:144p:,426x240:240p:,854x480:480p:,1280x720:720p:,...
-                    # Replace _TPL_ with each label to get the real manifest URL.
-                    import re as _re
-                    variants = _re.findall(r'\d+x\d+:(\d+p):', decrypted)
+                    variants = re.findall(r'\d+x\d+:(\d+p):', decrypted)
                     for label in variants:
                         ql  = label.replace("p", "")
                         url = decrypted.replace("_TPL_", label)
-                        # Only add if we don't already have this quality as MP4
                         if not any(q["quality"] == ql and q["format"] == "mp4" for q in qualities):
                             qualities.append({"quality": ql, "format": "hls", "url": url})
                 else:
@@ -177,13 +180,21 @@ def get_all_qualities(url: str) -> dict:
     host = (parsed.hostname or "").lower()
     if not _XH_VALID_HOSTS_RE.match(host):
         raise ValueError(f"Not a supported XHamster URL (host: {host!r}).")
-
     session = _cffi_session()
-    # Fetch page WITHOUT proxy — CDN URLs are signed for this server's outbound IP.
-    html   = fetch_page(url, session, proxy="")
-    result = extract_data(html)
-    result["proxy_id"] = -1
-    return result
+    html    = fetch_page(url, session, proxy="")
+    return extract_data(html)
+
+
+def _make_xh_stream_url(base_url: str, page_url: str, quality: str, dl: bool = False) -> str:
+    """Build a /xh/stream URL. The stream route re-fetches the page live."""
+    base_url = _normalize_proxy_base_url(base_url)
+    enc      = quote(page_url, safe="")
+    token    = sign_url(page_url)
+    dl_part  = "&dl=1" if dl else ""
+    if token:
+        return f"{base_url}/xh/stream?src={enc}&q={quote(quality)}&{token}{dl_part}"
+    return f"{base_url}/xh/stream?src={enc}&q={quote(quality)}{dl_part}"
+
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -195,13 +206,15 @@ def xh_download():
     if not body or "url" not in body:
         return jsonify({"status": "error", "message": "'url' required"}), 400
     try:
+        page_url = body["url"].strip()
         base_url = request.host_url.rstrip("/")
-        result   = get_all_qualities(body["url"].strip())
-        pid      = result.get("proxy_id", -1)
+        result   = get_all_qualities(page_url)
         qualities = [{
-            "quality": q["quality"], "format": q["format"], "url": q["url"],
-            "proxy_url":    make_proxy_url(base_url, "/adult/proxy", q["url"], quality=q["quality"], proxy_id=pid),
-            "download_url": make_proxy_url(base_url, "/adult/proxy", q["url"], extra="&dl=1", quality=q["quality"], proxy_id=pid),
+            "quality":      q["quality"],
+            "format":       q["format"],
+            "url":          q["url"],
+            "proxy_url":    _make_xh_stream_url(base_url, page_url, q["quality"]),
+            "download_url": _make_xh_stream_url(base_url, page_url, q["quality"], dl=True),
         } for q in result["qualities"]]
         if not qualities:
             return jsonify({"status": "error", "message": "No streams found."}), 404
@@ -230,14 +243,96 @@ def xh_watch():
     try:
         base_url = request.host_url.rstrip("/")
         result   = get_all_qualities(url)
-        pid      = result.get("proxy_id", -1)
         qualities = [{
             **q,
-            "proxy_url":    make_proxy_url(base_url, "/adult/proxy", q["url"], quality=q["quality"], proxy_id=pid),
-            "download_url": make_proxy_url(base_url, "/adult/proxy", q["url"], extra="&dl=1", quality=q["quality"], proxy_id=pid),
+            "proxy_url":    _make_xh_stream_url(base_url, url, q["quality"]),
+            "download_url": _make_xh_stream_url(base_url, url, q["quality"], dl=True),
         } for q in result["qualities"]]
         if not qualities:
             return "<h2>No streams found.</h2>", 404
         return render_watch_page(result, qualities)
     except Exception as e:
         return f"<h2 style='color:#f55'>Error: {e}</h2>", 500
+
+
+@bp.route("/xh/stream")
+def xh_stream():
+    """
+    Re-fetch the XH page live, pick the requested quality, stream immediately.
+    Page fetch + CDN stream are in the same request → same outbound IP → no 403.
+    """
+    import requests as _std_req
+
+    src     = request.args.get("src", "").strip()
+    quality = request.args.get("q", "").strip()
+    dl      = request.args.get("dl", "0") == "1"
+
+    if not src:
+        return jsonify({"status": "error", "message": "'src' required"}), 400
+    if not verify_proxy_token(src) and not check_raw_key():
+        return jsonify({"status": "error", "message": "Access denied."}), 403
+
+    # Re-fetch page — CDN URL signed for THIS request's outbound IP
+    try:
+        session = _cffi_session()
+        html    = fetch_page(src, session, proxy="")
+        data    = extract_data(html)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Page fetch failed: {e}"}), 502
+
+    # Find requested quality; fall back to best available
+    cdn_url = ""
+    cdn_fmt = "mp4"
+    for q in data["qualities"]:
+        if q["quality"] == quality:
+            cdn_url = q["url"]
+            cdn_fmt = q["format"]
+            break
+    if not cdn_url and data["qualities"]:
+        cdn_url = data["qualities"][0]["url"]
+        cdn_fmt = data["qualities"][0]["format"]
+    if not cdn_url:
+        return jsonify({"status": "error", "message": "Quality not found."}), 404
+
+    # Stream using plain requests — same OS TCP stack → same egress IP as page fetch
+    referer = adult_referer(cdn_url)
+    hdrs = {
+        "Referer":         referer,
+        "Origin":          referer.rstrip("/"),
+        "Accept":          "*/*",
+        "Accept-Encoding": "identity",
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    }
+    if rng := request.headers.get("Range"):
+        hdrs["Range"] = rng
+
+    try:
+        upstream = _std_req.get(cdn_url, headers=hdrs, stream=True,
+                                allow_redirects=True, timeout=30)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"CDN fetch error: {e}"}), 502
+
+    if upstream.status_code not in (200, 206):
+        return jsonify({"status": "error",
+                        "message": f"CDN returned HTTP {upstream.status_code}."}), upstream.status_code
+
+    fname = cdn_url.split("/")[-1].split("?")[0] or "video.mp4"
+    if not any(fname.endswith(e) for e in (".mp4", ".webm", ".ts", ".m3u8")):
+        fname += ".mp4"
+    is_m3u8 = cdn_fmt == "hls" or ".m3u8" in cdn_url
+    ct      = upstream.headers.get("Content-Type",
+                                   "application/vnd.apple.mpegurl" if is_m3u8 else "video/mp4")
+    disp    = f'attachment; filename="{fname}"' if dl else f'inline; filename="{fname}"'
+    rh      = {"Content-Disposition": disp, "Accept-Ranges": "bytes",
+               "Access-Control-Allow-Origin": "*", "X-Accel-Buffering": "no"}
+    for h in ("Content-Length", "Content-Range"):
+        if v := upstream.headers.get(h):
+            rh[h] = v
+
+    def generate():
+        for chunk in upstream.iter_content(chunk_size=65536):
+            if chunk:
+                yield chunk
+
+    return Response(stream_with_context(generate()),
+                    status=upstream.status_code, content_type=ct, headers=rh)
