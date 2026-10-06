@@ -178,12 +178,15 @@ def get_all_qualities(url: str) -> dict:
     if not _XH_VALID_HOSTS_RE.match(host):
         raise ValueError(f"Not a supported XHamster URL (host: {host!r}).")
     try:
+        from api.utils import get_proxy_with_id
         session = _cffi_session()
-        # Fetch XHamster page WITHOUT proxy — CDN URL will be signed for this
-        # server's own IP, allowing direct streaming without proxy routing.
-        # XHamster CDN bans datacenter proxies anyway, so proxying doesn't help.
-        html    = fetch_page(url, session, proxy="")
-        result  = extract_data(html)
+        # Pin a single proxy for BOTH the page fetch and CDN streaming.
+        # XHamster CDN signs URLs to the IP that fetched the page — so the
+        # same proxy IP must be reused when adult_proxy streams the video.
+        proxy_url, proxy_id = get_proxy_with_id()
+        html   = fetch_page(url, session, proxy=proxy_url)
+        result = extract_data(html)
+        result["proxy_id"] = proxy_id  # carry through to make_proxy_url
     except Exception as primary_error:
         try:
             from api.extractors.ytdlp import _ytdlp_extract
@@ -202,6 +205,7 @@ def get_all_qualities(url: str) -> dict:
                 "duration": result_info["duration"],
                 "duration_seconds": result_info["duration_seconds"],
                 "qualities": fallback_qualities,
+                "proxy_id": -1,
             }
         except Exception as fallback_error:
             raise ValueError(
@@ -221,10 +225,11 @@ def xh_download():
     try:
         base_url = request.host_url.rstrip("/")
         result   = get_all_qualities(body["url"].strip())
+        pid      = result.get("proxy_id", -1)
         qualities = [{
             "quality": q["quality"], "format": q["format"], "url": q["url"],
-            "proxy_url":    make_proxy_url(base_url, "/adult/proxy", q["url"], quality=q["quality"]),
-            "download_url": make_proxy_url(base_url, "/adult/proxy", q["url"], extra="&dl=1", quality=q["quality"]),
+            "proxy_url":    make_proxy_url(base_url, "/adult/proxy", q["url"], quality=q["quality"], proxy_id=pid),
+            "download_url": make_proxy_url(base_url, "/adult/proxy", q["url"], extra="&dl=1", quality=q["quality"], proxy_id=pid),
         } for q in result["qualities"]]
         if not qualities:
             return jsonify({"status": "error", "message": "No streams found."}), 404
@@ -253,10 +258,11 @@ def xh_watch():
     try:
         base_url = request.host_url.rstrip("/")
         result   = get_all_qualities(url)
+        pid      = result.get("proxy_id", -1)
         qualities = [{
             **q,
-            "proxy_url":    make_proxy_url(base_url, "/adult/proxy", q["url"], quality=q["quality"]),
-            "download_url": make_proxy_url(base_url, "/adult/proxy", q["url"], extra="&dl=1", quality=q["quality"]),
+            "proxy_url":    make_proxy_url(base_url, "/adult/proxy", q["url"], quality=q["quality"], proxy_id=pid),
+            "download_url": make_proxy_url(base_url, "/adult/proxy", q["url"], extra="&dl=1", quality=q["quality"], proxy_id=pid),
         } for q in result["qualities"]]
         if not qualities:
             return "<h2>No streams found.</h2>", 404

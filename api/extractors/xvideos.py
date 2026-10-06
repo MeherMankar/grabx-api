@@ -414,7 +414,9 @@ def adult_proxy():
     is_ts   = cdn_url.endswith(".ts") or ".ts?" in cdn_url
 
     try:
+        import re as _re
         from curl_cffi import requests as cffi_req
+        from api.utils import get_proxy_by_id
         session  = cffi_req.Session(impersonate="chrome124")
         referer  = adult_referer(cdn_url)
         headers  = {"Referer": referer, "Origin": referer.rstrip("/"),
@@ -422,9 +424,33 @@ def adult_proxy():
         if rng := request.headers.get("Range"):
             headers["Range"] = rng
 
-        upstream = session.get(cdn_url, headers=headers, allow_redirects=True,
-                               timeout=30, http_version=3, doh_url="https://1.1.1.1/dns-query",
-                               stream=True)
+        # If a proxy_id was embedded in the URL, reuse that same proxy so the
+        # CDN IP check passes (CDN URLs are signed to the IP that fetched the page).
+        pid_str  = request.args.get("pid", "")
+        pid      = int(pid_str) if pid_str.lstrip("-").isdigit() else -1
+        proxy    = get_proxy_by_id(pid) if pid >= 0 else ""
+
+        fetch_kwargs = dict(
+            headers=headers, allow_redirects=True, timeout=30, stream=True,
+        )
+        if proxy:
+            fetch_kwargs["proxies"] = {"http": proxy, "https": proxy}
+        else:
+            # No pinned proxy — use HTTP/3 + DoH only for non-IPv6-locked URLs.
+            # IPv6-locked XH CDN URLs must use OS resolver (not DoH) to preserve IPv6.
+            _has_ipv6_lock = bool(_re.search(r'/data=[0-9a-fA-F:]{4,}-dvp/', cdn_url))
+            if not _has_ipv6_lock:
+                fetch_kwargs["http_version"] = 3
+                fetch_kwargs["doh_url"] = "https://1.1.1.1/dns-query"
+
+        upstream = session.get(cdn_url, **fetch_kwargs)
+
+        # Fallback: if first attempt fails, retry without DoH/HTTP3 and without proxy
+        if upstream.status_code not in (200, 206):
+            upstream.close()
+            upstream = session.get(cdn_url, headers=headers,
+                                   allow_redirects=True, timeout=30, stream=True)
+
         if upstream.status_code not in (200, 206):
             return jsonify({"status": "error", "message": f"CDN returned HTTP {upstream.status_code}."}), upstream.status_code
 
