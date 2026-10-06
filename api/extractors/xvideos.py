@@ -445,6 +445,17 @@ def adult_proxy():
     is_mpd = ".mpd" in cdn_url.lower()
     is_ts   = cdn_url.endswith(".ts") or ".ts?" in cdn_url
 
+    # XHamster CDN (xhcdn.com, xhpingcdn.com) blocks all datacenter IPs.
+    # The CDN URL is already signed for the server's own IP (no proxy used at fetch time).
+    # Redirect the browser directly to the CDN URL — the browser's IP doesn't matter
+    # for server-signed URLs; the signature is for the proxy/server that fetches it.
+    # For MP4 (non-HLS, non-download): redirect directly to CDN.
+    xh_cdn_hosts = ("xhcdn.com", "xhpingcdn.com", "xhstorage.com", "xhmscdn")
+    is_xh_cdn = any(h in cdn_url for h in xh_cdn_hosts)
+    if is_xh_cdn and not is_m3u8 and not is_ts and not download_mode:
+        from flask import redirect as flask_redirect
+        return flask_redirect(cdn_url, code=302)
+
     try:
         from curl_cffi import requests as cffi_req
         session  = cffi_req.Session(impersonate="chrome124")
