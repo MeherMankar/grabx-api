@@ -215,13 +215,16 @@ def xh_download():
         page_url = body["url"].strip()
         base_url = request.host_url.rstrip("/")
         result   = get_all_qualities(page_url)
+        # If any HLS source exists, all stream URLs will use it regardless of quality.
+        # Mark format as hls so the player uses HLS.js correctly.
+        has_hls  = any(q["format"] == "hls" for q in result["qualities"])
         qualities = [{
             "quality":      q["quality"],
-            "format":       q["format"],
+            "format":       "hls" if has_hls else q["format"],
             "url":          q["url"],
             "proxy_url":    _make_xh_stream_url(base_url, page_url, q["quality"]),
             "download_url": _make_xh_stream_url(base_url, page_url, q["quality"], dl=True),
-        } for q in result["qualities"]]
+        } for q in result["qualities"] if q["format"] == "mp4" or q["format"] == "hls"]
         if not qualities:
             return jsonify({"status": "error", "message": "No streams found."}), 404
         best = next((q for q in qualities if q["format"] == "mp4"), qualities[0])
@@ -249,11 +252,13 @@ def xh_watch():
     try:
         base_url = request.host_url.rstrip("/")
         result   = get_all_qualities(url)
+        has_hls  = any(q["format"] == "hls" for q in result["qualities"])
         qualities = [{
             **q,
+            "format":       "hls" if has_hls else q["format"],
             "proxy_url":    _make_xh_stream_url(base_url, url, q["quality"]),
             "download_url": _make_xh_stream_url(base_url, url, q["quality"], dl=True),
-        } for q in result["qualities"]]
+        } for q in result["qualities"] if q["format"] == "mp4" or q["format"] == "hls"]
         if not qualities:
             return "<h2>No streams found.</h2>", 404
         return render_watch_page(result, qualities)
@@ -298,14 +303,14 @@ def xh_stream():
     except Exception as e:
         return jsonify({"status": "error", "message": f"Page fetch failed: {e}"}), 502
 
-    # Prefer HLS for the requested quality — MP4 CDN URLs are IP-locked and unreliable.
-    # Priority: HLS at requested quality > MP4 at requested quality > any HLS > best available
-    hls_match = next((q for q in data["qualities"] if q["quality"] == quality and q["format"] == "hls"), None)
-    mp4_match = next((q for q in data["qualities"] if q["quality"] == quality and q["format"] == "mp4"), None)
+    # Always prefer HLS — MP4 CDN URLs are IP-locked and return 403.
+    # For any requested quality, we use the HLS manifest which covers all qualities.
+    # Priority: any HLS > MP4 at exact quality > best available
     any_hls   = next((q for q in data["qualities"] if q["format"] == "hls"), None)
+    mp4_match = next((q for q in data["qualities"] if q["quality"] == quality and q["format"] == "mp4"), None)
     best      = data["qualities"][0] if data["qualities"] else None
 
-    chosen = hls_match or mp4_match or any_hls or best
+    chosen = any_hls or mp4_match or best
     if not chosen:
         return jsonify({"status": "error", "message": "No stream found."}), 404
 
