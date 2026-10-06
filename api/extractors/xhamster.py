@@ -179,7 +179,10 @@ def get_all_qualities(url: str) -> dict:
         raise ValueError(f"Not a supported XHamster URL (host: {host!r}).")
     try:
         session = _cffi_session()
-        html    = fetch_page(url, session)
+        # Fetch XHamster page WITHOUT proxy — CDN URL will be signed for this
+        # server's own IP, allowing direct streaming without proxy routing.
+        # XHamster CDN bans datacenter proxies anyway, so proxying doesn't help.
+        html    = fetch_page(url, session, proxy="")
         result  = extract_data(html)
     except Exception as primary_error:
         try:
