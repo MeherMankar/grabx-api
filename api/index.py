@@ -210,18 +210,40 @@ def create_job():
         return jsonify({"status": "error", "message": "URL must be a public HTTP(S) address."}), 400
     try:
         queue = extraction_queue()
-        if not queue_workers(queue):
+        has_workers = bool(queue_workers(queue))
+        if not has_workers:
+            # No async worker running — fall back to synchronous extraction
+            app.logger.warning("/jobs: no worker available, running synchronously")
+            base_url = request.host_url.rstrip("/").replace("http://", "https://")
+            result = extract_job(url, base_url)
+            import uuid
+            fake_id = str(uuid.uuid4())
             return jsonify({
-                "status": "error",
-                "message": "No worker is listening on the 'grabx' queue. Start the grabx-worker service, then retry.",
-            }), 503
+                "status": "finished",
+                "job_id": fake_id,
+                "result": result,
+                "note": "Processed synchronously (no async worker running).",
+            }), 200
         job = queue.enqueue(
             extract_job, url, request.host_url.rstrip("/").replace("http://", "https://"),
             job_timeout=180, result_ttl=3600, failure_ttl=86400,
         )
     except Exception:
         app.logger.exception("Could not enqueue extraction job")
-        return jsonify({"status": "error", "message": "Job queue is unavailable."}), 503
+        # Last resort: try synchronous
+        try:
+            base_url = request.host_url.rstrip("/").replace("http://", "https://")
+            result = extract_job(url, base_url)
+            import uuid
+            fake_id = str(uuid.uuid4())
+            return jsonify({
+                "status": "finished",
+                "job_id": fake_id,
+                "result": result,
+                "note": "Processed synchronously (job queue unavailable).",
+            }), 200
+        except Exception as e:
+            return jsonify({"status": "error", "message": f"Extraction failed: {e}"}), 500
     return jsonify({
         "status": "queued",
         "job_id": job.id,
