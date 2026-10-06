@@ -86,6 +86,35 @@ def get_proxy() -> str:
     return random.choice(proxies)
 
 
+def get_proxy_with_id() -> tuple:
+    """
+    Return (proxy_url, proxy_index) — the index can be embedded in CDN proxy URLs
+    so the same proxy is reused when streaming, ensuring the CDN IP matches.
+    Returns ("", -1) if no proxies configured.
+    """
+    proxies = _parse_proxy_list()
+    if not proxies:
+        return "", -1
+    import random
+    idx = random.randrange(len(proxies))
+    return proxies[idx], idx
+
+
+def get_proxy_by_id(idx: int) -> str:
+    """
+    Return the proxy URL at the given index.
+    Used by proxy routes to reuse the same IP that signed the CDN URL.
+    Falls back to random if index is out of range.
+    """
+    proxies = _parse_proxy_list()
+    if not proxies:
+        return ""
+    if 0 <= idx < len(proxies):
+        return proxies[idx]
+    import random
+    return random.choice(proxies)
+
+
 def get_proxy_for_url(cdn_url: str) -> str:
     """Select the configured proxy whose address is embedded in an XHamster CDN URL."""
     parsed = urlparse(cdn_url)
@@ -234,11 +263,12 @@ def _normalize_proxy_base_url(base_url: str) -> str:
 
 
 def make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
-                   viewkey: str = "", quality: str = "", src_domain: str = "") -> str:
+                   viewkey: str = "", quality: str = "", src_domain: str = "",
+                   proxy_id: int = -1) -> str:
     """
     Build a signed proxy URL.
-    Routes /ph/proxy, /jav/proxy through CF Worker when configured.
-    /proxy (Terabox) and /adult/proxy always stay on the API server (IP-locked CDN).
+    proxy_id: index of the proxy used to fetch the source page.
+              Embed it so the proxy route reuses the same IP for CDN requests.
     """
     base_url = _normalize_proxy_base_url(base_url)
 
@@ -249,12 +279,13 @@ def make_proxy_url(base_url: str, path: str, cdn_url: str, extra: str = "",
 
     enc      = quote(cdn_url, safe="")
     token    = sign_url(cdn_url)
-    vk_part  = f"&vk={quote(viewkey)}"     if viewkey     else ""
-    q_part   = f"&q={quote(quality)}"      if quality     else ""
-    src_part = f"&src={quote(src_domain)}" if src_domain  else ""
+    vk_part  = f"&vk={quote(viewkey)}"     if viewkey         else ""
+    q_part   = f"&q={quote(quality)}"      if quality         else ""
+    src_part = f"&src={quote(src_domain)}" if src_domain      else ""
+    pid_part = f"&pid={proxy_id}"          if proxy_id >= 0   else ""
     if token:
-        return f"{proxy_base}{path}?url={enc}&{token}{vk_part}{q_part}{src_part}{extra}"
-    return f"{proxy_base}{path}?url={enc}{vk_part}{q_part}{src_part}{extra}"
+        return f"{proxy_base}{path}?url={enc}&{token}{vk_part}{q_part}{src_part}{pid_part}{extra}"
+    return f"{proxy_base}{path}?url={enc}{vk_part}{q_part}{src_part}{pid_part}{extra}"
 
 
 def make_dash_proxy_url(base_url: str, path: str, root_url: str, media_url: str) -> str:

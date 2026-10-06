@@ -29,9 +29,10 @@ def _cffi_session(cookies: dict = None, domains: list = None):
     return session
 
 
-def fetch_page(url: str, session=None) -> str:
+def fetch_page(url: str, session=None, proxy: str = None) -> str:
     from api.utils import get_proxy
-    proxy = get_proxy()
+    if proxy is None:
+        proxy = get_proxy()
     try:
         if session is None:
             session = _cffi_session()
