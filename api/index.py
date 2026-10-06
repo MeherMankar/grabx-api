@@ -29,6 +29,13 @@ from api.utils import (
     _get_api_key, CF_WORKER_URL, REDIS_URL, enforce_rate_limit, get_abuse_events,
     get_redis, log_abuse_event, validate_proxy_target,
 )
+
+# Backwards-compatible test/runtime override; production falls back to env vars.
+API_KEY = ""
+
+
+def _configured_api_key() -> str:
+    return API_KEY.strip() or _get_api_key()
 from api.extractors.terabox import bp as terabox_bp, get_account_count
 from api.extractors.pornhub import bp as pornhub_bp
 from api.extractors.javtiful import bp as javtiful_bp
@@ -39,7 +46,7 @@ from api.extractors.adult_sites import bp as adult_sites_bp
 
 app = Flask(__name__)
 if os.environ.get("APP_ENV", "").lower() == "production":
-    if not _get_api_key():
+    if not _configured_api_key():
         raise RuntimeError("_get_api_key() is required when APP_ENV=production.")
     if not REDIS_URL:
         raise RuntimeError("REDIS_URL is required when APP_ENV=production.")
@@ -60,7 +67,9 @@ app.register_blueprint(adult_sites_bp)
 # Auth middleware
 # ---------------------------------------------------------------------------
 
-_PUBLIC_ROUTES   = {"/", "/docs", "/health", "/debug/headers"}
+# Browser-facing XH proxy endpoints are public at middleware level; their
+# handlers still require a valid signed target token.
+_PUBLIC_ROUTES   = {"/", "/docs", "/health", "/debug/headers", "/xh/stream", "/xh/seg"}
 _PUBLIC_PREFIXES = (
     "/ph/watch/", "/xv/watch", "/xnxx/watch", "/xh/watch",
     "/jav/watch", "/yt/watch", "/redtube/watch", "/youporn/watch",
@@ -95,9 +104,10 @@ def _check_api_key():
 
     if request.path in {"/", "/docs", "/health"}:
         return
-    identity = key if (not is_public and key and key == _get_api_key()) else (request.remote_addr or "unknown")
+    configured_key = _configured_api_key()
+    identity = key if (not is_public and key and key == configured_key) else (request.remote_addr or "unknown")
     limit = _PROXY_RATE_LIMIT if request.path in {
-        "/proxy", "/ph/proxy", "/adult/proxy", "/jav/proxy",
+        "/proxy", "/ph/proxy", "/adult/proxy", "/jav/proxy", "/xh/stream", "/xh/seg",
     } else _RATE_LIMIT
     rate_identity = f"{'proxy' if limit == _PROXY_RATE_LIMIT else 'api'}:{sha256(identity.encode()).hexdigest()[:24]}"
     try:
@@ -118,7 +128,7 @@ def _check_api_key():
             "Retry-After": str(retry_after),
         }
 
-    if not is_public and not _get_api_key():
+    if not is_public and not configured_key:
         return jsonify({
             "status": "error",
             "message": "_get_api_key() is required for protected routes. Set _get_api_key() in the environment.",
@@ -131,7 +141,7 @@ def _check_api_key():
                 "Authorization: Bearer <key>, or ?api_key= query param."
             ),
         }), 401
-    if not is_public and key != _get_api_key():
+    if not is_public and key != configured_key:
         return jsonify({"status": "error", "message": "Invalid API key."}), 403
 
 
@@ -147,7 +157,7 @@ def home():
         "creator":      "Maintained by MeherMankar (t.me/MeherPatil) | Terabox base by genxnano (t.me/genxnano)",
         "github":       "https://github.com/MeherMankar/grabx-api",
         "accounts_configured": get_account_count(),
-        "auth":         "enabled (X-API-Key required)" if _get_api_key() else "protected routes unavailable (_get_api_key() unset)",
+        "auth":         "enabled (X-API-Key required)" if _configured_api_key() else "protected routes unavailable (_get_api_key() unset)",
         "proxy_backend": CF_WORKER_URL if CF_WORKER_URL else "render (this server)",
         "endpoints": {
             "/download":     {"method": "POST", "description": "Terabox share → direct download links"},
@@ -191,7 +201,7 @@ def health():
         "python":   sys.version,
         "platform": platform.platform(),
         "accounts_configured": get_account_count(),
-        "auth":     "enabled" if _get_api_key() else "protected routes unavailable (_get_api_key() unset)",
+        "auth":     "enabled" if _configured_api_key() else "protected routes unavailable (_get_api_key() unset)",
         "proxy_backend": CF_WORKER_URL if CF_WORKER_URL else "render (this server)",
         "cache":    cache_stats(),
         "redis":    "connected" if REDIS_URL else "local-development fallback",

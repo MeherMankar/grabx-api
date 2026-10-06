@@ -237,12 +237,14 @@ Extract stream/download links from an XHamster video.
 **Response** — up to 5 MP4 qualities (144p → 720p) + HLS.  
 XHamster encrypts source URLs; GrabX decrypts them using the PRNG algorithm from the XHamster player (matches yt-dlp's XHamster extractor). Returns error if XHamster updates their algorithm.
 
+`best_download_url` downloads the best available MP4 quality. The browser player also includes a **Download MP4** button; it refreshes the XHamster page before fetching the file, so it does not depend on a configured CDN worker URL.
+
 **Supported domains:** xhamster.com, xhamster.desi, xhamster.one, xhamster.xxx, xhamster.net, and language subdomains.
 
 ---
 
 ### `GET /xh/watch?url=<video_url>`
-Browser video player. Always public.
+Browser video player with proxied HLS playback and an MP4 download button. Always public.
 
 ---
 

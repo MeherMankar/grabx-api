@@ -33,16 +33,36 @@ def fetch_page(url: str, session=None, proxy: str = None) -> str:
     from api.utils import get_proxy
     if proxy is None:
         proxy = get_proxy()
+    last_error = None
     try:
         if session is None:
             session = _cffi_session()
-        kwargs = dict(allow_redirects=True, timeout=20,
-                      http_version=3, doh_url="https://1.1.1.1/dns-query")
-        if proxy:
-            kwargs["proxies"] = {"http": proxy, "https": proxy}
-        resp = session.get(url, **kwargs)
+        request_options = [
+            {"http_version": 3, "doh_url": "https://1.1.1.1/dns-query"},
+            {},
+        ]
+        for transport in request_options:
+            kwargs = dict(allow_redirects=True, timeout=20, **transport)
+            if proxy:
+                kwargs["proxies"] = {"http": proxy, "https": proxy}
+            try:
+                resp = session.get(url, **kwargs)
+                if resp.status_code == 200:
+                    break
+                last_error = ValueError(f"Site returned HTTP {resp.status_code}.")
+            except Exception as exc:
+                last_error = exc
+        else:
+            try:
+                import requests as standard_requests
+                kwargs = {"allow_redirects": True, "timeout": 20}
+                if proxy:
+                    kwargs["proxies"] = {"http": proxy, "https": proxy}
+                resp = standard_requests.get(url, **kwargs)
+            except Exception as exc:
+                raise last_error or exc
     except Exception as e:
-        raise ValueError(f"Network error fetching page: {e}")
+        raise ValueError(f"Network error fetching page: {e}") from e
     if resp.status_code != 200:
         raise ValueError(f"Site returned HTTP {resp.status_code}.")
     return resp.text
@@ -406,6 +426,8 @@ def adult_proxy():
     cdn_url = request.args.get("url", "").strip()
     if not cdn_url:
         return jsonify({"status": "error", "message": "'url' required"}), 400
+    if not validate_proxy_target(cdn_url):
+        return jsonify({"status": "error", "message": "Invalid proxy target."}), 400
     if not verify_proxy_token(cdn_url) and not check_raw_key():
         return jsonify({"status": "error", "message": "Access denied."}), 403
 

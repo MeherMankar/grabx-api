@@ -29,7 +29,8 @@ from flask import request
 def _get_api_key() -> str:
     """Read API key lazily so dotenv has time to load before first use."""
     return (
-        os.environ.get("API_KEY", "").strip()
+        API_KEY.strip()
+        or os.environ.get("API_KEY", "").strip()
         or os.environ.get("GRABX_API_KEY", "").strip()
     )
 
@@ -402,7 +403,8 @@ def render_watch_page(meta: dict, qualities: list):
     options_html = "\n".join(
         f'<option value="{html_attr(o.get("proxy_url",""))}" '
         f'data-fmt="{html_attr(o["format"])}" '
-        f'data-dl="{html_attr(o.get("download_url",""))}">'
+        f'data-dl="{html_attr(o.get("download_url",""))}" '
+        f'data-dl-label="{html_attr(o.get("download_label",""))}">'
         f'{html_lib.escape(str(o["quality"]))}{"p" if str(o["quality"]).isdigit() else ""} {html_lib.escape(str(o["format"]).upper())}'
         f'</option>'
         for o in sorted_opts
@@ -522,6 +524,7 @@ def render_watch_page(meta: dict, qualities: list):
     let dash    = null;
     let currentDlUrl = {best_dl};
     let currentFmt   = {best_fmt};
+    let currentDlLabel = '';
 
     function setStatus(text, error = false) {{
       statusText.textContent = text;
@@ -535,24 +538,29 @@ def render_watch_page(meta: dict, qualities: list):
       playerMessage.classList.remove('hidden');
     }}
 
-    function loadSrc(streamUrl, fmt, dlUrl) {{
+    function loadSrc(streamUrl, fmt, dlUrl, dlLabel) {{
       const isHls = fmt === 'hls' || streamUrl.includes('.m3u8');
       const isDash = fmt === 'dash' || streamUrl.includes('.mpd');
       currentDlUrl = dlUrl; currentFmt = fmt;
-      // Update button label based on format
-      dlBtn.textContent = (isHls || isDash) ? 'Copy stream URL' : '↓ Download';
+      currentDlLabel = dlLabel || ((isHls || isDash) ? 'Copy stream URL' : '↓ Download');
+      dlBtn.textContent = currentDlLabel;
+      dlBtn.disabled = !dlUrl;
       showMessage('Preparing stream', 'Connecting to the video source…', true);
       setStatus('Loading stream');
       if (hls) {{ hls.destroy(); hls = null; }}
       if (dash) {{ dash.reset(); dash = null; }}
       if (isHls) {{
-        if (Hls.isSupported()) {{
+        if (typeof Hls !== 'undefined' && Hls.isSupported()) {{
           hls = new Hls({{ enableWorker: true }});
           hls.loadSource(streamUrl);
           hls.attachMedia(video);
           hls.on(Hls.Events.MANIFEST_PARSED, () => {{ playerMessage.classList.add('hidden'); setStatus('Playing HLS stream'); video.play().catch(() => {{}}); }});
           hls.on(Hls.Events.ERROR, (_event, data) => {{
-            if (data.fatal) {{ showMessage('Stream unavailable', 'The HLS source could not be loaded. Try another quality or try again later.'); setStatus('Stream error', true); }}
+            if (data.fatal) {{
+              const code = data.response && data.response.code ? ' (HTTP ' + data.response.code + ')' : '';
+              showMessage('Stream unavailable', 'HLS ' + data.details + code + '. Try again later.');
+              setStatus('Stream error', true);
+            }}
           }});
         }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
           video.src = streamUrl; video.play().catch(() => {{}});
@@ -606,16 +614,16 @@ def render_watch_page(meta: dict, qualities: list):
 
     dlBtn.addEventListener('click', async function() {{
       if (currentFmt === 'hls' || currentFmt === 'dash') {{
-        // HLS can't be downloaded as a single file in the browser.
-        // Copy the stream URL to clipboard and show a message.
+        if (currentDlLabel.includes('Download MP4')) {{
+          window.open(currentDlUrl, '_blank', 'noopener');
+          return;
+        }}
         try {{
           await navigator.clipboard.writeText(currentDlUrl);
           dlBtn.textContent = 'Copied!';
-          setTimeout(() => {{ dlBtn.textContent = 'Copy stream URL'; }}, 2000);
+          setTimeout(() => {{ dlBtn.textContent = currentDlLabel; }}, 1800);
         }} catch(e) {{
-          // Fallback: prompt user to copy manually
-          const msg = 'HLS stream URL (copy and open in VLC):\\n' + currentDlUrl;
-          prompt('HLS stream — open in VLC or copy URL:', currentDlUrl);
+          prompt('Copy stream URL:', currentDlUrl);
         }}
         return;
       }}
@@ -637,10 +645,10 @@ def render_watch_page(meta: dict, qualities: list):
     }});
 
     const first = sel.options[sel.selectedIndex];
-    loadSrc(first.value, first.dataset.fmt, first.dataset.dl);
+    loadSrc(first.value, first.dataset.fmt, first.dataset.dl, first.dataset.dlLabel);
     sel.addEventListener('change', function() {{
       const opt = this.options[this.selectedIndex];
-      loadSrc(opt.value, opt.dataset.fmt, opt.dataset.dl);
+      loadSrc(opt.value, opt.dataset.fmt, opt.dataset.dl, opt.dataset.dlLabel);
     }});
   </script>
 </body>
