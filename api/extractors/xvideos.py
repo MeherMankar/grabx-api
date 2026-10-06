@@ -424,28 +424,32 @@ def adult_proxy():
         if rng := request.headers.get("Range"):
             headers["Range"] = rng
 
-        # If a proxy_id was embedded in the URL, reuse that same proxy so the
-        # CDN IP check passes (CDN URLs are signed to the IP that fetched the page).
-        pid_str  = request.args.get("pid", "")
-        pid      = int(pid_str) if pid_str.lstrip("-").isdigit() else -1
-        proxy    = get_proxy_by_id(pid) if pid >= 0 else ""
+        pid_str = request.args.get("pid", "")
+        pid     = int(pid_str) if pid_str.lstrip("-").isdigit() else -1
+        proxy   = get_proxy_by_id(pid) if pid >= 0 else ""
+
+        # XH CDN URLs (xhcdn.com) are IP-locked — must use same IP as page fetch.
+        # Page is fetched direct (no proxy), so stream must also go direct.
+        # CRITICAL: skip DoH (1.1.1.1) because it forces IPv4; use OS resolver
+        # so Koyeb can connect over its native IPv4/IPv6 matching the signed IP.
+        is_xhcdn = "xhcdn.com" in cdn_url
 
         fetch_kwargs = dict(
             headers=headers, allow_redirects=True, timeout=30, stream=True,
         )
         if proxy:
             fetch_kwargs["proxies"] = {"http": proxy, "https": proxy}
+        elif is_xhcdn:
+            # Direct fetch, OS DNS, HTTP/2 — no DoH, no HTTP/3
+            # This ensures the outbound IP matches what XH signed the CDN URL for
+            fetch_kwargs["http_version"] = 2
         else:
-            # No pinned proxy — use HTTP/3 + DoH only for non-IPv6-locked URLs.
-            # IPv6-locked XH CDN URLs must use OS resolver (not DoH) to preserve IPv6.
-            _has_ipv6_lock = bool(_re.search(r'/data=[0-9a-fA-F:]{4,}-dvp/', cdn_url))
-            if not _has_ipv6_lock:
-                fetch_kwargs["http_version"] = 3
-                fetch_kwargs["doh_url"] = "https://1.1.1.1/dns-query"
+            fetch_kwargs["http_version"] = 3
+            fetch_kwargs["doh_url"] = "https://1.1.1.1/dns-query"
 
         upstream = session.get(cdn_url, **fetch_kwargs)
 
-        # Fallback: if first attempt fails, retry without DoH/HTTP3 and without proxy
+        # Fallback: plain fetch with no options
         if upstream.status_code not in (200, 206):
             upstream.close()
             upstream = session.get(cdn_url, headers=headers,

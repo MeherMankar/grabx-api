@@ -178,15 +178,12 @@ def get_all_qualities(url: str) -> dict:
     if not _XH_VALID_HOSTS_RE.match(host):
         raise ValueError(f"Not a supported XHamster URL (host: {host!r}).")
     try:
-        from api.utils import get_proxy_with_id
         session = _cffi_session()
-        # Pin a single proxy for BOTH the page fetch and CDN streaming.
-        # XHamster CDN signs URLs to the IP that fetched the page — so the
-        # same proxy IP must be reused when adult_proxy streams the video.
-        proxy_url, proxy_id = get_proxy_with_id()
-        html   = fetch_page(url, session, proxy=proxy_url)
+        # Fetch WITHOUT proxy — CDN URLs get signed for Koyeb's own IP.
+        # adult_proxy must also go direct (no proxy, no DoH) to match the IP.
+        html   = fetch_page(url, session, proxy="")
         result = extract_data(html)
-        result["proxy_id"] = proxy_id  # carry through to make_proxy_url
+        result["proxy_id"] = -1  # signal: no proxy, go direct
     except Exception as primary_error:
         try:
             from api.extractors.ytdlp import _ytdlp_extract
