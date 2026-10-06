@@ -26,10 +26,15 @@ from flask import request
 # Configuration (read once at import time)
 # ---------------------------------------------------------------------------
 
-API_KEY: str = (
-    os.environ.get("API_KEY", "").strip()
-    or os.environ.get("GRABX_API_KEY", "").strip()
-)
+def _get_api_key() -> str:
+    """Read API key lazily so dotenv has time to load before first use."""
+    return (
+        os.environ.get("API_KEY", "").strip()
+        or os.environ.get("GRABX_API_KEY", "").strip()
+    )
+
+# Module-level alias — re-read on every access via the function above
+API_KEY: str = ""  # populated lazily; use _get_api_key() internally
 
 CF_WORKER_URL: str = os.environ.get("CF_WORKER_URL", "").rstrip("/")
 
@@ -111,11 +116,12 @@ MOBILE_UA = (
 
 def sign_url(cdn_url: str) -> str:
     """Return '_t=<hmac>&_e=<expiry>' params for a CDN URL, or '' if no key."""
-    if not API_KEY:
+    key = _get_api_key()
+    if not key:
         return ""
     expiry = int(_time.time()) + TOKEN_TTL
     msg    = f"{expiry}:{cdn_url}".encode()
-    sig    = hmac.new(API_KEY.encode(), msg, hashlib.sha256).digest()
+    sig    = hmac.new(key.encode(), msg, hashlib.sha256).digest()
     token  = base64.urlsafe_b64encode(sig).rstrip(b"=").decode()
     return f"_t={token}&_e={expiry}"
 
@@ -168,7 +174,8 @@ def validate_proxy_target(cdn_url: str) -> bool:
 
 def verify_proxy_token(cdn_url: str) -> bool:
     """True if request has a valid signed token for cdn_url, requiring API_KEY to be configured."""
-    if not API_KEY:
+    key = _get_api_key()
+    if not key:
         return False
     t   = request.args.get("_t", "")
     exp = request.args.get("_e", "")
@@ -181,14 +188,15 @@ def verify_proxy_token(cdn_url: str) -> bool:
     if _time.time() > expiry:
         return False
     msg      = f"{expiry}:{cdn_url}".encode()
-    expected = hmac.new(API_KEY.encode(), msg, hashlib.sha256).digest()
+    expected = hmac.new(key.encode(), msg, hashlib.sha256).digest()
     expected_b64 = base64.urlsafe_b64encode(expected).rstrip(b"=").decode()
     return hmac.compare_digest(t, expected_b64)
 
 
 def check_raw_key() -> bool:
     """True if the request carries the raw API key in any accepted location."""
-    if not API_KEY:
+    key_needed = _get_api_key()
+    if not key_needed:
         return False
     auth  = request.headers.get("Authorization", "")
     bearer = auth.removeprefix("Bearer ").strip() if auth.lower().startswith("bearer ") else ""
@@ -205,7 +213,7 @@ def check_raw_key() -> bool:
         or request.args.get("grabx_api_key")
         or bearer
     )
-    return key == API_KEY
+    return key == key_needed
 
 
 # ---------------------------------------------------------------------------

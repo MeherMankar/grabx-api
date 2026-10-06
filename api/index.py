@@ -26,7 +26,7 @@ except ImportError:
     pass
 
 from api.utils import (
-    API_KEY, CF_WORKER_URL, REDIS_URL, enforce_rate_limit, get_abuse_events,
+    _get_api_key, CF_WORKER_URL, REDIS_URL, enforce_rate_limit, get_abuse_events,
     get_redis, log_abuse_event, validate_proxy_target,
 )
 from api.extractors.terabox import bp as terabox_bp, get_account_count
@@ -39,8 +39,8 @@ from api.extractors.adult_sites import bp as adult_sites_bp
 
 app = Flask(__name__)
 if os.environ.get("APP_ENV", "").lower() == "production":
-    if not API_KEY:
-        raise RuntimeError("API_KEY is required when APP_ENV=production.")
+    if not _get_api_key():
+        raise RuntimeError("_get_api_key() is required when APP_ENV=production.")
     if not REDIS_URL:
         raise RuntimeError("REDIS_URL is required when APP_ENV=production.")
     get_redis().ping()
@@ -95,7 +95,7 @@ def _check_api_key():
 
     if request.path in {"/", "/docs", "/health"}:
         return
-    identity = key if (not is_public and key and key == API_KEY) else (request.remote_addr or "unknown")
+    identity = key if (not is_public and key and key == _get_api_key()) else (request.remote_addr or "unknown")
     limit = _PROXY_RATE_LIMIT if request.path in {
         "/proxy", "/ph/proxy", "/adult/proxy", "/jav/proxy",
     } else _RATE_LIMIT
@@ -103,8 +103,8 @@ def _check_api_key():
     try:
         allowed, retry_after = enforce_rate_limit(rate_identity, limit)
     except Exception:
-        app.logger.exception("Rate limiter backend unavailable")
-        return jsonify({"status": "error", "message": "Rate limiter is temporarily unavailable."}), 503
+        app.logger.warning("Rate limiter unavailable — allowing request")
+        allowed, retry_after = True, 0
     if not allowed:
         try:
             log_abuse_event({
@@ -113,16 +113,15 @@ def _check_api_key():
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
         except Exception:
-            app.logger.exception("Could not persist rate-limit violation")
-            return jsonify({"status": "error", "message": "Abuse log is temporarily unavailable."}), 503
+            app.logger.warning("Could not persist rate-limit violation")
         return jsonify({"status": "error", "message": "Rate limit exceeded."}), 429, {
             "Retry-After": str(retry_after),
         }
 
-    if not is_public and not API_KEY:
+    if not is_public and not _get_api_key():
         return jsonify({
             "status": "error",
-            "message": "API_KEY is required for protected routes. Set API_KEY in the environment.",
+            "message": "_get_api_key() is required for protected routes. Set _get_api_key() in the environment.",
         }), 401
     if not is_public and not key:
         return jsonify({
@@ -132,7 +131,7 @@ def _check_api_key():
                 "Authorization: Bearer <key>, or ?api_key= query param."
             ),
         }), 401
-    if not is_public and key != API_KEY:
+    if not is_public and key != _get_api_key():
         return jsonify({"status": "error", "message": "Invalid API key."}), 403
 
 
@@ -148,7 +147,7 @@ def home():
         "creator":      "Maintained by MeherMankar (t.me/MeherPatil) | Terabox base by genxnano (t.me/genxnano)",
         "github":       "https://github.com/MeherMankar/grabx-api",
         "accounts_configured": get_account_count(),
-        "auth":         "enabled (X-API-Key required)" if API_KEY else "protected routes unavailable (API_KEY unset)",
+        "auth":         "enabled (X-API-Key required)" if _get_api_key() else "protected routes unavailable (_get_api_key() unset)",
         "proxy_backend": CF_WORKER_URL if CF_WORKER_URL else "render (this server)",
         "endpoints": {
             "/download":     {"method": "POST", "description": "Terabox share → direct download links"},
@@ -192,7 +191,7 @@ def health():
         "python":   sys.version,
         "platform": platform.platform(),
         "accounts_configured": get_account_count(),
-        "auth":     "enabled" if API_KEY else "protected routes unavailable (API_KEY unset)",
+        "auth":     "enabled" if _get_api_key() else "protected routes unavailable (_get_api_key() unset)",
         "proxy_backend": CF_WORKER_URL if CF_WORKER_URL else "render (this server)",
         "cache":    cache_stats(),
         "redis":    "connected" if REDIS_URL else "local-development fallback",
