@@ -4,12 +4,12 @@ XHamster encrypts MP4 source URLs in window.initials using a seeded PRNG XOR cip
 Format: [1-byte algo_id][4-byte LE seed][XOR-encrypted payload]
 Algorithm IDs 1-7 match yt-dlp's XHamster extractor exactly.
 
-Streaming strategy (/xh/stream):
-  Re-fetches the XH page LIVE on every stream request, gets a fresh CDN URL
-  signed for the current outbound IP, then streams it immediately.
-  Uses the final redirected page URL as Referer (same as yt-dlp does).
-  Prefers HLS over MP4 — yt-dlp marks MP4 formats as __needs_testing because
-  XHamster CDN IP-locks them and they return "Wrong key" errors.
+Streaming strategy:
+  /xh/watch and /xh/download return ONE stream URL pointing to /xh/stream.
+  /xh/stream re-fetches the XH page live in that same request, picks the HLS
+  manifest (which covers all qualities), and streams it immediately.
+  One request = one page fetch = one consistent outbound IP = no CDN 403.
+  HLS is preferred because MP4 CDN URLs are IP-locked (yt-dlp: __needs_testing).
 """
 import re
 import json
@@ -18,9 +18,9 @@ from flask import Blueprint, request, jsonify, Response, stream_with_context
 from urllib.parse import urlparse, quote
 
 from api.utils import (
-    make_proxy_url, render_watch_page, verify_proxy_token,
-    check_raw_key, adult_referer, sign_url, _normalize_proxy_base_url,
-    _get_api_key,
+    render_watch_page, verify_proxy_token,
+    check_raw_key, sign_url, _normalize_proxy_base_url, _get_api_key,
+    adult_referer,
 )
 from api.extractors.xvideos import fetch_page  # reuse curl_cffi fetch
 
@@ -144,26 +144,17 @@ def extract_data(html: str) -> dict:
             if decrypted.startswith("http"):
                 qualities.append({"quality": ql, "format": "mp4", "url": decrypted})
 
+    hls_url = None
     for codec in ("h264", "av1"):
         entry   = sources.get("hls", {}).get(codec, {})
         hls_hex = (entry.get("url") or "").strip() if isinstance(entry, dict) else ""
         if hls_hex:
             decrypted = decrypt_url(hls_hex)
             if decrypted.startswith("http"):
-                if "_TPL_" in decrypted:
-                    variants = re.findall(r'\d+x\d+:(\d+p):', decrypted)
-                    for label in variants:
-                        ql  = label.replace("p", "")
-                        url = decrypted.replace("_TPL_", label)
-                        if not any(q["quality"] == ql and q["format"] == "mp4" for q in qualities):
-                            qualities.append({"quality": ql, "format": "hls", "url": url})
-                else:
-                    qualities.append({"quality": "hls", "format": "hls", "url": decrypted})
+                hls_url = decrypted
                 break
 
     qualities.sort(key=lambda e: (0, -int(e["quality"])) if e["quality"].isdigit() else (1, 0))
-    if not qualities:
-        raise ValueError("Could not decrypt XHamster stream URLs. Algorithm may have changed.")
 
     return {
         "title":            vm.get("title", vi.get("title", "Unknown Title")),
@@ -171,6 +162,7 @@ def extract_data(html: str) -> dict:
         "duration":         f"{secs // 60}:{secs % 60:02d}" if secs else "",
         "duration_seconds": secs,
         "qualities":        qualities,
+        "hls_url":          hls_url,  # master HLS manifest covering all qualities
     }
 
 
@@ -187,19 +179,18 @@ def get_all_qualities(url: str) -> dict:
     return extract_data(html)
 
 
-def _make_xh_stream_url(base_url: str, page_url: str, quality: str, dl: bool = False) -> str:
-    """Build a /xh/stream URL. The stream route re-fetches the page live."""
+def _make_xh_stream_url(base_url: str, page_url: str, dl: bool = False) -> str:
+    """Build ONE /xh/stream URL for the whole video (HLS handles quality internally)."""
     base_url = _normalize_proxy_base_url(base_url)
     enc      = quote(page_url, safe="")
     token    = sign_url(page_url)
     dl_part  = "&dl=1" if dl else ""
     if token:
-        return f"{base_url}/xh/stream?src={enc}&q={quote(quality)}&{token}{dl_part}"
-    # Fallback: embed raw api_key for browser auth
+        return f"{base_url}/xh/stream?src={enc}&{token}{dl_part}"
     key = _get_api_key()
     if key:
-        return f"{base_url}/xh/stream?src={enc}&q={quote(quality)}&api_key={quote(key)}{dl_part}"
-    return f"{base_url}/xh/stream?src={enc}&q={quote(quality)}{dl_part}"
+        return f"{base_url}/xh/stream?src={enc}&api_key={quote(key)}{dl_part}"
+    return f"{base_url}/xh/stream?src={enc}{dl_part}"
 
 
 # ---------------------------------------------------------------------------
@@ -212,30 +203,30 @@ def xh_download():
     if not body or "url" not in body:
         return jsonify({"status": "error", "message": "'url' required"}), 400
     try:
-        page_url = body["url"].strip()
-        base_url = request.host_url.rstrip("/")
-        result   = get_all_qualities(page_url)
-        # If any HLS source exists, all stream URLs will use it regardless of quality.
-        # Mark format as hls so the player uses HLS.js correctly.
-        has_hls  = any(q["format"] == "hls" for q in result["qualities"])
+        page_url   = body["url"].strip()
+        base_url   = request.host_url.rstrip("/")
+        result     = get_all_qualities(page_url)
+        stream_url = _make_xh_stream_url(base_url, page_url)
+        dl_url     = _make_xh_stream_url(base_url, page_url, dl=True)
+        # Expose per-quality entries but all point to the same HLS stream
         qualities = [{
             "quality":      q["quality"],
-            "format":       "hls" if has_hls else q["format"],
+            "format":       "hls",
             "url":          q["url"],
-            "proxy_url":    _make_xh_stream_url(base_url, page_url, q["quality"]),
-            "download_url": _make_xh_stream_url(base_url, page_url, q["quality"], dl=True),
-        } for q in result["qualities"] if q["format"] == "mp4" or q["format"] == "hls"]
+            "proxy_url":    stream_url,
+            "download_url": dl_url,
+        } for q in result["qualities"]]
         if not qualities:
             return jsonify({"status": "error", "message": "No streams found."}), 404
-        best = next((q for q in qualities if q["format"] == "mp4"), qualities[0])
         return jsonify({
             "status": "success",
             "data": {
                 "title": result["title"], "thumbnail": result["thumbnail"],
                 "duration": result["duration"], "duration_seconds": result["duration_seconds"],
                 "qualities": qualities,
-                "best_proxy_url": best["proxy_url"], "best_download_url": best["download_url"],
-                "note": "Use best_proxy_url to stream or best_download_url to download.",
+                "best_proxy_url":    stream_url,
+                "best_download_url": dl_url,
+                "note": "Use best_proxy_url to stream (HLS, all qualities).",
             },
         })
     except ValueError as e:
@@ -250,17 +241,18 @@ def xh_watch():
     if not url:
         return "<h2>Missing ?url=</h2>", 400
     try:
-        base_url = request.host_url.rstrip("/")
-        result   = get_all_qualities(url)
-        has_hls  = any(q["format"] == "hls" for q in result["qualities"])
+        base_url   = request.host_url.rstrip("/")
+        result     = get_all_qualities(url)
+        stream_url = _make_xh_stream_url(base_url, url)
+        dl_url     = _make_xh_stream_url(base_url, url, dl=True)
+        # Single HLS entry covers all qualities via adaptive bitrate
         qualities = [{
-            **q,
-            "format":       "hls" if has_hls else q["format"],
-            "proxy_url":    _make_xh_stream_url(base_url, url, q["quality"]),
-            "download_url": _make_xh_stream_url(base_url, url, q["quality"], dl=True),
-        } for q in result["qualities"] if q["format"] == "mp4" or q["format"] == "hls"]
-        if not qualities:
-            return "<h2>No streams found.</h2>", 404
+            "quality":      "Auto",
+            "format":       "hls",
+            "url":          result.get("hls_url", ""),
+            "proxy_url":    stream_url,
+            "download_url": dl_url,
+        }]
         return render_watch_page(result, qualities)
     except Exception as e:
         return f"<h2 style='color:#f55'>Error: {e}</h2>", 500
@@ -269,26 +261,21 @@ def xh_watch():
 @bp.route("/xh/stream")
 def xh_stream():
     """
-    Re-fetch the XH page live, pick the requested quality, stream immediately.
-    Page fetch + CDN stream share the same request/process → same outbound IP → no 403.
-
-    Key insight from yt-dlp source: MP4 formats are marked __needs_testing because
-    XHamster CDN IP-locks them and they return errors. HLS manifests work reliably.
-    We prefer HLS, and use the final redirected page URL as Referer (as yt-dlp does).
+    Re-fetch the XH page live, get a fresh HLS manifest URL signed for the
+    current outbound IP, stream it immediately.
+    One request = one page fetch = one IP = no CDN 403.
     """
     import requests as _std_req
 
-    src     = request.args.get("src", "").strip()
-    quality = request.args.get("q", "").strip()
-    dl      = request.args.get("dl", "0") == "1"
+    src = request.args.get("src", "").strip()
+    dl  = request.args.get("dl", "0") == "1"
 
     if not src:
         return jsonify({"status": "error", "message": "'src' required"}), 400
     if not verify_proxy_token(src) and not check_raw_key():
         return jsonify({"status": "error", "message": "Access denied."}), 403
 
-    # Re-fetch XH page — CDN URLs signed for THIS request's outbound IP.
-    # Capture final URL after redirects to use as Referer (yt-dlp: urlh.url).
+    # Re-fetch page live — HLS URL is signed for THIS request's outbound IP
     try:
         from curl_cffi import requests as cffi_req
         cffi_session = cffi_req.Session(impersonate="chrome124")
@@ -303,21 +290,16 @@ def xh_stream():
     except Exception as e:
         return jsonify({"status": "error", "message": f"Page fetch failed: {e}"}), 502
 
-    # Always prefer HLS — MP4 CDN URLs are IP-locked and return 403.
-    # For any requested quality, we use the HLS manifest which covers all qualities.
-    # Priority: any HLS > MP4 at exact quality > best available
-    any_hls   = next((q for q in data["qualities"] if q["format"] == "hls"), None)
-    mp4_match = next((q for q in data["qualities"] if q["quality"] == quality and q["format"] == "mp4"), None)
-    best      = data["qualities"][0] if data["qualities"] else None
+    # Prefer HLS master manifest (all qualities in one URL, no IP-lock issues)
+    cdn_url = data.get("hls_url") or ""
+    if not cdn_url:
+        # No HLS — try best MP4 (may 403 on datacenter IPs, but worth trying)
+        best = next((q for q in data["qualities"] if q["format"] == "mp4"), None)
+        if not best:
+            return jsonify({"status": "error", "message": "No stream found."}), 404
+        cdn_url = best["url"]
 
-    chosen = any_hls or mp4_match or best
-    if not chosen:
-        return jsonify({"status": "error", "message": "No stream found."}), 404
-
-    cdn_url = chosen["url"]
-    cdn_fmt = chosen["format"]
-
-    # Use final page URL as Referer — exactly what yt-dlp does (urlh.url)
+    # Use final page URL as Referer — same as yt-dlp (urlh.url)
     parsed_final = urlparse(final_url)
     hdrs = {
         "Referer":         final_url,
@@ -339,10 +321,8 @@ def xh_stream():
         return jsonify({"status": "error",
                         "message": f"CDN returned HTTP {upstream.status_code}."}), upstream.status_code
 
-    fname = cdn_url.split("/")[-1].split("?")[0] or "video.mp4"
-    if not any(fname.endswith(e) for e in (".mp4", ".webm", ".ts", ".m3u8")):
-        fname += ".mp4"
-    is_m3u8 = cdn_fmt == "hls" or ".m3u8" in cdn_url
+    is_m3u8 = ".m3u8" in cdn_url or "mpegurl" in upstream.headers.get("Content-Type", "").lower()
+    fname   = "playlist.m3u8" if is_m3u8 else "video.mp4"
     ct      = upstream.headers.get("Content-Type",
                                    "application/vnd.apple.mpegurl" if is_m3u8 else "video/mp4")
     disp    = f'attachment; filename="{fname}"' if dl else f'inline; filename="{fname}"'
