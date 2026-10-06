@@ -137,23 +137,23 @@ segments/part.ts
         self.assertTrue(upstream.closed)
         self.assertEqual(fetch_segment.call_args.kwargs["headers"]["Range"], "bytes=0-3")
 
-    def test_watch_player_offers_mp4_download_for_hls_quality(self):
+    def test_watch_player_offers_hls_link_for_selected_quality(self):
         page, status, _ = utils.render_watch_page(
             {"title": "Test video", "thumbnail": ""},
             [{
                 "quality": "Auto",
                 "format": "hls",
                 "proxy_url": "https://api.example/xh/stream",
-                "download_url": "https://api.example/xh/stream?dl=1&quality=720",
-                "download_label": "↓ Download MP4",
+                "download_url": "https://api.example/xh/stream?quality=720",
+                "download_label": "Copy HLS URL",
             }],
         )
 
         self.assertEqual(status, 200)
         self.assertIn('id="dlBtn"', page)
-        self.assertIn('data-dl-label="↓ Download MP4"', page)
+        self.assertIn('data-dl-label="Copy HLS URL"', page)
         self.assertIn("currentDlLabel.includes('Download MP4')", page)
-        self.assertIn("window.open(currentDlUrl, '_blank', 'noopener')", page)
+        self.assertIn("navigator.clipboard.writeText(currentDlUrl)", page)
 
 
 if __name__ == "__main__":

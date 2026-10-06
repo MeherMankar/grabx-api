@@ -232,6 +232,32 @@ def _rewrite_hls_manifest(manifest_text: str, manifest_url: str, base_url: str) 
     return "\n".join(lines) + "\n"
 
 
+def _select_hls_variant(manifest_text: str, requested_quality: str) -> str:
+    """Return the HLS variant nearest to the requested video height."""
+    if not requested_quality or "#EXT-X-STREAM-INF:" not in manifest_text:
+        return ""
+    try:
+        target = int(requested_quality)
+    except ValueError:
+        return ""
+
+    selected_uri = ""
+    selected_distance = None
+    pending_height = None
+    for line in manifest_text.splitlines():
+        line = line.strip()
+        if line.startswith("#EXT-X-STREAM-INF:"):
+            match = re.search(r"(?:^|,)RESOLUTION=\d+x(\d+)(?:,|$)", line)
+            pending_height = int(match.group(1)) if match else None
+        elif pending_height is not None and line and not line.startswith("#"):
+            distance = abs(pending_height - target)
+            if selected_distance is None or distance < selected_distance:
+                selected_uri = line
+                selected_distance = distance
+            pending_height = None
+    return selected_uri
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -246,18 +272,15 @@ def xh_download():
         base_url   = request.host_url.rstrip("/")
         result     = get_all_qualities(page_url)
         stream_url = _make_xh_stream_url(base_url, page_url)
-        best_mp4 = max(
-            (q for q in result["qualities"] if q["format"] == "mp4"),
-            key=lambda q: int(q["quality"]) if q["quality"].isdigit() else 0,
-            default=None,
-        )
         qualities  = [{
             "quality":      q["quality"],
             "format":       "hls",
             "url":          q["url"],
-            "proxy_url":    stream_url,
+            "proxy_url": _make_xh_stream_url(
+                base_url, page_url, quality=q["quality"],
+            ),
             "download_url": _make_xh_stream_url(
-                base_url, page_url, dl=True, quality=q["quality"], media_url=q["url"],
+                base_url, page_url, quality=q["quality"],
             ),
         } for q in result["qualities"]]
         if not qualities:
@@ -269,13 +292,7 @@ def xh_download():
                 "duration": result["duration"], "duration_seconds": result["duration_seconds"],
                 "qualities": qualities,
                 "best_proxy_url":    stream_url,
-                "best_download_url": (
-                    _make_xh_stream_url(
-                        base_url, page_url, dl=True, quality=best_mp4["quality"],
-                        media_url=best_mp4["url"],
-                    )
-                    if best_mp4 else ""
-                ),
+                "best_download_url": stream_url,
                 "note": "Use best_proxy_url to stream (HLS, all qualities).",
             },
         })
@@ -294,26 +311,26 @@ def xh_watch():
         base_url   = request.host_url.rstrip("/")
         result     = get_all_qualities(url)
         stream_url = _make_xh_stream_url(base_url, url)
-        best_mp4 = max(
-            (q for q in result["qualities"] if q["format"] == "mp4"),
-            key=lambda q: int(q["quality"]) if q["quality"].isdigit() else 0,
-            default=None,
-        )
-        dl_url = (
-            _make_xh_stream_url(
-                base_url, url, dl=True, quality=best_mp4["quality"],
-                media_url=best_mp4["url"],
-            )
-            if best_mp4 else ""
-        )
         qualities  = [{
             "quality":      "Auto",
             "format":       "hls",
             "url":          result.get("hls_url", ""),
             "proxy_url":    stream_url,
-            "download_url": dl_url,
-            "download_label": "↓ Download MP4" if best_mp4 else "MP4 unavailable",
+            "download_url": stream_url,
+            "download_label": "Copy HLS URL",
         }]
+        for source in result["qualities"]:
+            quality_stream_url = _make_xh_stream_url(
+                base_url, url, quality=source["quality"],
+            )
+            qualities.append({
+                "quality": source["quality"],
+                "format": "hls",
+                "url": result.get("hls_url", ""),
+                "proxy_url": quality_stream_url,
+                "download_url": quality_stream_url,
+                "download_label": "Copy HLS URL",
+            })
         return render_watch_page(result, qualities)
     except Exception as e:
         return f"<h2 style='color:#f55'>Error: {e}</h2>", 500
@@ -455,6 +472,25 @@ def xh_stream():
     # Rewrite all segment/sub-manifest URLs through /xh/seg
     base_url     = request.host_url.rstrip("/")
     actual_url   = manifest_resp.url  # URL after any redirects
+    requested_quality = request.args.get("quality", "").strip()
+    variant_uri = _select_hls_variant(manifest_resp.text, requested_quality)
+    if variant_uri:
+        variant_url = urljoin(actual_url, variant_uri)
+        try:
+            variant_resp = _std_req.get(
+                variant_url, headers=hdrs, timeout=20, allow_redirects=True,
+            )
+        except Exception as e:
+            return jsonify({"status": "error", "message": f"Variant fetch error: {e}"}), 502
+        if variant_resp.status_code not in (200, 206):
+            return jsonify({
+                "status": "error",
+                "message": f"Variant CDN returned HTTP {variant_resp.status_code}.",
+            }), variant_resp.status_code
+        manifest_resp.close()
+        manifest_resp = variant_resp
+        actual_url = manifest_resp.url
+
     rewritten    = _rewrite_hls_manifest(manifest_resp.text, actual_url, base_url)
 
     return Response(
