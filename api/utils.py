@@ -614,7 +614,7 @@ def render_watch_page(meta: dict, qualities: list):
 
     dlBtn.addEventListener('click', async function() {{
       if (currentFmt === 'hls' || currentFmt === 'dash') {{
-        if (currentDlLabel.includes('Download MP4')) {{
+        if (currentDlLabel.includes('Download MP4') || currentDlLabel.includes('Download HLS')) {{
           window.open(currentDlUrl, '_blank', 'noopener');
           return;
         }}

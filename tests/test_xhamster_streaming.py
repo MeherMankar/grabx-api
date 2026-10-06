@@ -84,9 +84,11 @@ segments/part.ts
             }),
             patch("api.extractors.xhamster._request_adult_stream", return_value=upstream) as fetch_mp4,
         ):
-            token = utils.sign_url(page_url)
+            media_url = "https://video-h.xhcdn.com/480.mp4"
+            token = utils.sign_url(media_url)
             response = index.app.test_client().get(
-                f"/xh/stream?src={quote(page_url, safe='')}&{token}&dl=1&quality=480",
+                f"/xh/stream?src={quote(page_url, safe='')}&{token}"
+                f"&dl=1&quality=480&media={quote(media_url, safe='')}",
                 headers={"Range": "bytes=0-4"},
             )
 
@@ -98,7 +100,7 @@ segments/part.ts
         )
         self.assertEqual(response.headers["Content-Range"], "bytes 0-4/10")
         self.assertTrue(upstream.closed)
-        self.assertEqual(fetch_mp4.call_args.args[1], "https://cdn.example/480.mp4")
+        self.assertEqual(fetch_mp4.call_args.args[1], media_url)
         self.assertEqual(fetch_mp4.call_args.args[2]["Range"], "bytes=0-4")
 
     def test_segment_endpoint_accepts_signed_browser_request_without_api_key(self):
@@ -145,15 +147,15 @@ segments/part.ts
                 "format": "hls",
                 "proxy_url": "https://api.example/xh/stream",
                 "download_url": "https://api.example/xh/stream?quality=720",
-                "download_label": "Copy HLS URL",
+                "download_label": "↓ Download HLS",
             }],
         )
 
         self.assertEqual(status, 200)
         self.assertIn('id="dlBtn"', page)
-        self.assertIn('data-dl-label="Copy HLS URL"', page)
+        self.assertIn('data-dl-label="↓ Download HLS"', page)
         self.assertIn("currentDlLabel.includes('Download MP4')", page)
-        self.assertIn("navigator.clipboard.writeText(currentDlUrl)", page)
+        self.assertIn("currentDlLabel.includes('Download HLS')", page)
 
 
 if __name__ == "__main__":

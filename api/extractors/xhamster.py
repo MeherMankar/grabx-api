@@ -258,6 +258,22 @@ def _select_hls_variant(manifest_text: str, requested_quality: str) -> str:
     return selected_uri
 
 
+def _hls_quality_url(hls_url: str, quality: str) -> str:
+    """Resolve XHamster's quality template to a quality-specific HLS URL."""
+    if not hls_url or not quality.isdigit():
+        return hls_url
+    return hls_url.replace("_TPL_", f"{quality}p")
+
+
+def _hls_quality_options(hls_url: str) -> list:
+    """Return quality labels advertised by XHamster's HLS URL template."""
+    match = re.search(r"/multi=([^/]+)/", hls_url or "")
+    if not match:
+        return []
+    qualities = re.findall(r":(\d+)p(?:[,]|$)", match.group(1))
+    return sorted(set(qualities), key=int, reverse=True)
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -272,17 +288,30 @@ def xh_download():
         base_url   = request.host_url.rstrip("/")
         result     = get_all_qualities(page_url)
         stream_url = _make_xh_stream_url(base_url, page_url)
+        hls_qualities = _hls_quality_options(result.get("hls_url", ""))
         qualities  = [{
-            "quality":      q["quality"],
+            "quality":      quality,
             "format":       "hls",
-            "url":          q["url"],
-            "proxy_url": _make_xh_stream_url(
-                base_url, page_url, quality=q["quality"],
+            "url":          _hls_quality_url(result.get("hls_url", ""), quality),
+            "proxy_url":    _make_xh_stream_url(
+                base_url, page_url, quality=quality,
             ),
             "download_url": _make_xh_stream_url(
-                base_url, page_url, quality=q["quality"],
+                base_url, page_url, dl=True, quality=quality,
             ),
-        } for q in result["qualities"]]
+            "download_label": "↓ Download HLS",
+        } for quality in hls_qualities]
+        if not qualities:
+            qualities = [{
+                "quality": "Auto",
+                "format": "hls",
+                "url": result.get("hls_url", ""),
+                "proxy_url": stream_url,
+                "download_url": _make_xh_stream_url(
+                    base_url, page_url, dl=True,
+                ),
+                "download_label": "↓ Download HLS",
+            }]
         if not qualities:
             return jsonify({"status": "error", "message": "No streams found."}), 404
         return jsonify({
@@ -292,7 +321,7 @@ def xh_download():
                 "duration": result["duration"], "duration_seconds": result["duration_seconds"],
                 "qualities": qualities,
                 "best_proxy_url":    stream_url,
-                "best_download_url": stream_url,
+                "best_download_url": qualities[0]["download_url"],
                 "note": "Use best_proxy_url to stream (HLS, all qualities).",
             },
         })
@@ -311,26 +340,26 @@ def xh_watch():
         base_url   = request.host_url.rstrip("/")
         result     = get_all_qualities(url)
         stream_url = _make_xh_stream_url(base_url, url)
+        hls_qualities = _hls_quality_options(result.get("hls_url", ""))
         qualities  = [{
-            "quality":      "Auto",
+            "quality": quality,
             "format":       "hls",
-            "url":          result.get("hls_url", ""),
-            "proxy_url":    stream_url,
-            "download_url": stream_url,
-            "download_label": "Copy HLS URL",
-        }]
-        for source in result["qualities"]:
-            quality_stream_url = _make_xh_stream_url(
-                base_url, url, quality=source["quality"],
-            )
-            qualities.append({
-                "quality": source["quality"],
+            "url": _hls_quality_url(result.get("hls_url", ""), quality),
+            "proxy_url": _make_xh_stream_url(base_url, url, quality=quality),
+            "download_url": _make_xh_stream_url(
+                base_url, url, dl=True, quality=quality,
+            ),
+            "download_label": "↓ Download HLS",
+        } for quality in hls_qualities]
+        if not qualities:
+            qualities = [{
+                "quality": "Auto",
                 "format": "hls",
                 "url": result.get("hls_url", ""),
-                "proxy_url": quality_stream_url,
-                "download_url": quality_stream_url,
-                "download_label": "Copy HLS URL",
-            })
+                "proxy_url": stream_url,
+                "download_url": _make_xh_stream_url(base_url, url, dl=True),
+                "download_label": "↓ Download HLS",
+            }]
         return render_watch_page(result, qualities)
     except Exception as e:
         return f"<h2 style='color:#f55'>Error: {e}</h2>", 500
@@ -390,7 +419,7 @@ def xh_stream():
         "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     }
 
-    if dl:
+    if dl and media:
         mp4_sources = [q for q in data["qualities"] if q["format"] == "mp4"]
         requested_quality = request.args.get("quality", "").strip()
         selected = next(
@@ -456,7 +485,10 @@ def xh_stream():
             headers=headers,
         )
 
-    cdn_url = data.get("hls_url") or ""
+    cdn_url = _hls_quality_url(
+        data.get("hls_url") or "",
+        request.args.get("quality", "").strip(),
+    )
     if not cdn_url:
         return jsonify({"status": "error", "message": "No HLS stream found."}), 404
 
@@ -468,6 +500,55 @@ def xh_stream():
     if manifest_resp.status_code not in (200, 206):
         return jsonify({"status": "error",
                         "message": f"Manifest CDN returned HTTP {manifest_resp.status_code}."}), manifest_resp.status_code
+
+    actual_url = manifest_resp.url
+    if dl:
+        segment_urls = [
+            urljoin(actual_url, line.strip())
+            for line in manifest_resp.text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        if not segment_urls:
+            manifest_resp.close()
+            return jsonify({
+                "status": "error",
+                "message": "No downloadable HLS segments were found.",
+            }), 502
+
+        quality = request.args.get("quality", "").strip() or "auto"
+        headers = {
+            "Content-Disposition": f'attachment; filename="xhamster-{quality}p.ts"',
+            "Content-Type": "video/mp2t",
+            "Accept-Ranges": "none",
+            "X-Accel-Buffering": "no",
+        }
+        manifest_resp.close()
+
+        def download_hls_segments():
+            for segment_url in segment_urls:
+                try:
+                    segment = _std_req.get(
+                        segment_url, headers=hdrs, stream=True,
+                        allow_redirects=True, timeout=30,
+                    )
+                    if segment.status_code not in (200, 206):
+                        segment.close()
+                        continue
+                    try:
+                        for chunk in segment.iter_content(chunk_size=65536):
+                            if chunk:
+                                yield chunk
+                    finally:
+                        segment.close()
+                except Exception:
+                    continue
+
+        return Response(
+            stream_with_context(download_hls_segments()),
+            status=200,
+            content_type="video/mp2t",
+            headers=headers,
+        )
 
     # Rewrite all segment/sub-manifest URLs through /xh/seg
     base_url     = request.host_url.rstrip("/")
