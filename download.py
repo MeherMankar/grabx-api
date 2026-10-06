@@ -22,12 +22,12 @@ HDRS   = {"X-API-Key": APIKEY, "Content-Type": "application/json"}
 
 
 def _test_stream(label: str, proxy_url: str):
-    """HEAD-request the proxy URL and print the result."""
+    """GET the proxy URL with a Range header and print the result."""
     print(f"  Testing stream [{label}]...")
     t0 = time.time()
     try:
         r = requests.get(proxy_url, stream=True, timeout=25,
-                         headers={"Range": "bytes=0-65535"})
+                         headers={"Range": "bytes=0-65535", "X-API-Key": APIKEY})
         elapsed = time.time() - t0
         if r.status_code in (200, 206):
             cl = r.headers.get("Content-Length", "?")

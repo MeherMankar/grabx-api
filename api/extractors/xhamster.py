@@ -187,12 +187,17 @@ def get_all_qualities(url: str) -> dict:
 
 def _make_xh_stream_url(base_url: str, page_url: str, quality: str, dl: bool = False) -> str:
     """Build a /xh/stream URL. The stream route re-fetches the page live."""
+    from api.utils import _get_api_key
     base_url = _normalize_proxy_base_url(base_url)
     enc      = quote(page_url, safe="")
     token    = sign_url(page_url)
     dl_part  = "&dl=1" if dl else ""
     if token:
         return f"{base_url}/xh/stream?src={enc}&q={quote(quality)}&{token}{dl_part}"
+    # Fallback: embed raw api_key so the browser can access the stream route
+    key = _get_api_key()
+    if key:
+        return f"{base_url}/xh/stream?src={enc}&q={quote(quality)}&api_key={quote(key)}{dl_part}"
     return f"{base_url}/xh/stream?src={enc}&q={quote(quality)}{dl_part}"
 
 
