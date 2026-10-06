@@ -403,64 +403,15 @@ def xnxx_watch():
 
 @bp.route("/adult/proxy")
 def adult_proxy():
-    dash_segment = request.args.get("dash") == "1"
-    dash_root = request.args.get("root", "").strip()
     cdn_url = request.args.get("url", "").strip()
-    if dash_segment:
-        template = request.args.get("template", "").strip()
-        if not template or not dash_root:
-            return jsonify({"status": "error", "message": "Invalid DASH segment URL."}), 400
-        substitutions = {
-            "Number": request.args.get("n", ""),
-            "Time": request.args.get("t", ""),
-            "RepresentationID": request.args.get("r", ""),
-            "Bandwidth": request.args.get("b", ""),
-        }
-        for variable, value in substitutions.items():
-            if value:
-                template = re.sub(
-                    rf"\${variable}(?:%0\d+d)?\$",
-                    lambda _: value,
-                    template,
-                )
-        cdn_url = template
     if not cdn_url:
         return jsonify({"status": "error", "message": "'url' required"}), 400
-    if not validate_proxy_target(cdn_url):
-        return jsonify({"status": "error", "message": "Proxy target must be a public HTTP(S) URL."}), 400
-    if dash_segment:
-        root_parts = urlparse(dash_root)
-        target_parts = urlparse(cdn_url)
-        if (
-            not validate_proxy_target(dash_root)
-            or not verify_proxy_token(dash_root)
-            or (root_parts.scheme, root_parts.netloc) != (target_parts.scheme, target_parts.netloc)
-        ):
-            return jsonify({"status": "error", "message": "Invalid DASH manifest token or target."}), 403
-    elif not verify_proxy_token(cdn_url) and not check_raw_key():
+    if not verify_proxy_token(cdn_url) and not check_raw_key():
         return jsonify({"status": "error", "message": "Access denied."}), 403
 
     download_mode = request.args.get("dl", "0") == "1"
     is_m3u8 = ".m3u8" in cdn_url
-    is_mpd = ".mpd" in cdn_url.lower()
     is_ts   = cdn_url.endswith(".ts") or ".ts?" in cdn_url
-
-    # XHamster CDN (xhcdn.com, xhpingcdn.com) blocks all datacenter IPs.
-    # The CDN URL is already signed for the server's own IP (no proxy used at fetch time).
-    # Redirect the browser directly to the CDN URL — the browser's IP doesn't matter
-    # for server-signed URLs; the signature is for the proxy/server that fetches it.
-    # For MP4 (non-HLS, non-download): redirect directly to CDN.
-    xh_cdn_hosts = ("xhcdn.com", "xhpingcdn.com", "xhstorage.com", "xhmscdn")
-    is_xh_cdn = any(h in cdn_url for h in xh_cdn_hosts)
-    if is_xh_cdn and not is_m3u8 and not is_ts:
-        if download_mode:
-            # For downloads: stream through server with correct headers
-            pass  # fall through to streaming code below
-        else:
-            # For playback: redirect directly — browser will play MP4 natively
-            # XHamster CDN accepts direct browser requests for MP4 (no Referer check on MP4)
-            from flask import redirect as flask_redirect
-            return flask_redirect(cdn_url, code=302)
 
     try:
         from curl_cffi import requests as cffi_req
@@ -471,18 +422,11 @@ def adult_proxy():
         if rng := request.headers.get("Range"):
             headers["Range"] = rng
 
-        upstream = _request_adult_stream(session, cdn_url, headers)
+        upstream = session.get(cdn_url, headers=headers, allow_redirects=True,
+                               timeout=30, http_version=3, doh_url="https://1.1.1.1/dns-query",
+                               stream=True)
         if upstream.status_code not in (200, 206):
             return jsonify({"status": "error", "message": f"CDN returned HTTP {upstream.status_code}."}), upstream.status_code
-
-        if is_mpd:
-            rewritten = rewrite_dash_manifest(
-                upstream.text, cdn_url, request.host_url.rstrip("/"), "/adult/proxy"
-            )
-            return Response(
-                rewritten, status=200, content_type="application/dash+xml; charset=utf-8",
-                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
-            )
 
         if is_m3u8:
             manifest = upstream.text.strip()
