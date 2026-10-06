@@ -181,21 +181,22 @@ def get_all_qualities(url: str) -> dict:
 
 def _make_xh_stream_url(
     base_url: str, page_url: str, dl: bool = False, quality: str = "",
-    media_url: str = "",
+    media_url: str = "", hls_url: str = "",
 ) -> str:
     """Build /xh/stream URL — re-fetches page live, rewrites HLS manifest."""
     base_url = _normalize_proxy_base_url(base_url)
     enc      = quote(page_url, safe="")
-    token    = sign_url(media_url or page_url)
+    token    = sign_url(media_url or hls_url or page_url)
     dl_part  = "&dl=1" if dl else ""
     quality_part = f"&quality={quote(quality, safe='')}" if quality else ""
     media_part = f"&media={quote(media_url, safe='')}" if media_url else ""
+    hls_part = f"&hls={quote(hls_url, safe='')}" if hls_url else ""
     if token:
-        return f"{base_url}/xh/stream?src={enc}&{token}{dl_part}{quality_part}{media_part}"
+        return f"{base_url}/xh/stream?src={enc}&{token}{dl_part}{quality_part}{media_part}{hls_part}"
     key = _get_api_key()
     if key:
-        return f"{base_url}/xh/stream?src={enc}&api_key={quote(key)}{dl_part}{quality_part}{media_part}"
-    return f"{base_url}/xh/stream?src={enc}{dl_part}{quality_part}{media_part}"
+        return f"{base_url}/xh/stream?src={enc}&api_key={quote(key)}{dl_part}{quality_part}{media_part}{hls_part}"
+    return f"{base_url}/xh/stream?src={enc}{dl_part}{quality_part}{media_part}{hls_part}"
 
 
 def _make_xh_seg_url(base_url: str, cdn_url: str) -> str:
@@ -270,7 +271,7 @@ def _hls_quality_options(hls_url: str) -> list:
     match = re.search(r"/multi=([^/]+)/", hls_url or "")
     if not match:
         return []
-    qualities = re.findall(r":(\d+)p(?:[,]|$)", match.group(1))
+    qualities = re.findall(r":(\d+)p(?=[:,]|$)", match.group(1))
     return sorted(set(qualities), key=int, reverse=True)
 
 
@@ -287,7 +288,8 @@ def xh_download():
         page_url   = body["url"].strip()
         base_url   = request.host_url.rstrip("/")
         result     = get_all_qualities(page_url)
-        stream_url = _make_xh_stream_url(base_url, page_url)
+        hls_url = result.get("hls_url", "")
+        stream_url = _make_xh_stream_url(base_url, page_url, hls_url=hls_url)
         hls_qualities = _hls_quality_options(result.get("hls_url", ""))
         if not hls_qualities:
             hls_qualities = [
@@ -299,10 +301,10 @@ def xh_download():
             "format":       "hls",
             "url":          _hls_quality_url(result.get("hls_url", ""), quality),
             "proxy_url":    _make_xh_stream_url(
-                base_url, page_url, quality=quality,
+                base_url, page_url, quality=quality, hls_url=hls_url,
             ),
             "download_url": _make_xh_stream_url(
-                base_url, page_url, dl=True, quality=quality,
+                base_url, page_url, dl=True, quality=quality, hls_url=hls_url,
             ),
             "download_label": "↓ Download HLS",
         } for quality in hls_qualities]
@@ -313,7 +315,7 @@ def xh_download():
                 "url": result.get("hls_url", ""),
                 "proxy_url": stream_url,
                 "download_url": _make_xh_stream_url(
-                    base_url, page_url, dl=True,
+                    base_url, page_url, dl=True, hls_url=hls_url,
                 ),
                 "download_label": "↓ Download HLS",
             }]
@@ -344,7 +346,8 @@ def xh_watch():
     try:
         base_url   = request.host_url.rstrip("/")
         result     = get_all_qualities(url)
-        stream_url = _make_xh_stream_url(base_url, url)
+        hls_url = result.get("hls_url", "")
+        stream_url = _make_xh_stream_url(base_url, url, hls_url=hls_url)
         hls_qualities = _hls_quality_options(result.get("hls_url", ""))
         if not hls_qualities:
             hls_qualities = [
@@ -355,9 +358,11 @@ def xh_watch():
             "quality": quality,
             "format":       "hls",
             "url": _hls_quality_url(result.get("hls_url", ""), quality),
-            "proxy_url": _make_xh_stream_url(base_url, url, quality=quality),
+            "proxy_url": _make_xh_stream_url(
+                base_url, url, quality=quality, hls_url=hls_url,
+            ),
             "download_url": _make_xh_stream_url(
-                base_url, url, dl=True, quality=quality,
+                base_url, url, dl=True, quality=quality, hls_url=hls_url,
             ),
             "download_label": "↓ Download HLS",
         } for quality in hls_qualities]
@@ -367,7 +372,9 @@ def xh_watch():
                 "format": "hls",
                 "url": result.get("hls_url", ""),
                 "proxy_url": stream_url,
-                "download_url": _make_xh_stream_url(base_url, url, dl=True),
+                "download_url": _make_xh_stream_url(
+                    base_url, url, dl=True, hls_url=hls_url,
+                ),
                 "download_label": "↓ Download HLS",
             }]
         return render_watch_page(result, qualities)
@@ -389,10 +396,11 @@ def xh_stream():
     src = request.args.get("src", "").strip()
     dl  = request.args.get("dl", "0") == "1"
     media = request.args.get("media", "").strip()
+    pinned_hls = request.args.get("hls", "").strip()
 
     if not src:
         return jsonify({"status": "error", "message": "'src' required"}), 400
-    token_target = media if dl and media else src
+    token_target = media if dl and media else pinned_hls or src
     if not verify_proxy_token(token_target) and not check_raw_key():
         return jsonify({"status": "error", "message": "Access denied."}), 403
 
@@ -496,7 +504,7 @@ def xh_stream():
         )
 
     cdn_url = _hls_quality_url(
-        data.get("hls_url") or "",
+        pinned_hls or data.get("hls_url") or "",
         request.args.get("quality", "").strip(),
     )
     if not cdn_url:
