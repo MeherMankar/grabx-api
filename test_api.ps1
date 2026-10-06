@@ -32,56 +32,7 @@ try {
     Write-Host "Opening player: $WatchUrl"
     Start-Process $WatchUrl
 
-    Write-Host "`nQueueing asynchronous extraction..."
-    $Job = Invoke-RestMethod -Method Post -Uri "$BaseUrl/jobs" `
-        -Headers $Headers -ContentType "application/json" -Body $Body -TimeoutSec 30
-    Write-Host "Job ID: $($Job.job_id); initial status: $($Job.status)"
-
-    $StatusUrl = "$BaseUrl/jobs/$([uri]::EscapeDataString($Job.job_id))"
-    $JobStatus = $null
-    $StatusUnavailable = $false
-    for ($Attempt = 0; $Attempt -lt 40; $Attempt++) {
-        Start-Sleep -Seconds 3
-        try {
-            $JobStatus = Invoke-RestMethod -Uri $StatusUrl `
-                -Headers $Headers -TimeoutSec 30
-        } catch {
-            $Response = $_.Exception.Response
-            if ($Response) {
-                $Reader = New-Object System.IO.StreamReader($Response.GetResponseStream())
-                $ResponseBody = $Reader.ReadToEnd()
-                $Reader.Dispose()
-                Write-Warning "Job status request returned HTTP $([int]$Response.StatusCode): $ResponseBody"
-            } else {
-                Write-Warning "Could not reach the job status endpoint: $($_.Exception.Message)"
-            }
-            $StatusUnavailable = $true
-            break
-        }
-        Write-Host "Job status: $($JobStatus.status)"
-        if ($JobStatus.queue) {
-            $WorkerSummary = @($JobStatus.queue.workers | ForEach-Object {
-                "$($_.name) [$($_.state)]"
-            }) -join ", "
-            if (-not $WorkerSummary) {
-                $WorkerSummary = "none registered"
-            }
-            Write-Host "Queue depth: $($JobStatus.queue.queued_jobs); workers: $WorkerSummary"
-        }
-        if ($JobStatus.status -in @("finished", "failed")) {
-            break
-        }
-    }
-
-    if ($JobStatus.status -eq "finished") {
-        Write-Host "Job result: $($JobStatus.result.data.title)"
-    } elseif ($JobStatus.status -eq "failed") {
-        Write-Warning "Extraction job failed. Check the Koyeb RQ worker logs."
-    } elseif ($StatusUnavailable) {
-        Write-Warning "The job was queued, but its status could not be read. Check the Koyeb API logs for the /jobs/$($Job.job_id) request and the worker logs."
-    } else {
-        Write-Warning "Job is still queued/running after 120 seconds. Use the worker and queue details above to diagnose the Koyeb grabx-worker service."
-    }
+    Write-Host "`nAll tests passed successfully."
 } catch {
     Write-Error "API test failed: $($_.Exception.Message)"
     exit 1

@@ -202,7 +202,7 @@ def get_all_qualities(url: str) -> dict:
             }
         except Exception as fallback_error:
             raise ValueError(
-                f"XHamster extraction and yt-dlp fallback failed: {fallback_error}"
+                f"XHamster extraction failed: {primary_error}. yt-dlp also failed: {fallback_error}"
             ) from primary_error
     return result
 
