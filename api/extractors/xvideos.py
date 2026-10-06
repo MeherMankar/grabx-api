@@ -417,10 +417,10 @@ def adult_proxy():
         import re as _re
         from curl_cffi import requests as cffi_req
         from api.utils import get_proxy_by_id
-        session  = cffi_req.Session(impersonate="chrome124")
         referer  = adult_referer(cdn_url)
         headers  = {"Referer": referer, "Origin": referer.rstrip("/"),
-                    "Accept": "*/*", "Accept-Encoding": "identity"}
+                    "Accept": "*/*", "Accept-Encoding": "identity",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
         if rng := request.headers.get("Range"):
             headers["Range"] = rng
 
@@ -428,32 +428,26 @@ def adult_proxy():
         pid     = int(pid_str) if pid_str.lstrip("-").isdigit() else -1
         proxy   = get_proxy_by_id(pid) if pid >= 0 else ""
 
-        # XH CDN URLs (xhcdn.com) are IP-locked — must use same IP as page fetch.
-        # Page is fetched direct (no proxy), so stream must also go direct.
-        # CRITICAL: skip DoH (1.1.1.1) because it forces IPv4; use OS resolver
-        # so Koyeb can connect over its native IPv4/IPv6 matching the signed IP.
         is_xhcdn = "xhcdn.com" in cdn_url
 
-        fetch_kwargs = dict(
-            headers=headers, allow_redirects=True, timeout=30, stream=True,
-        )
-        if proxy:
-            fetch_kwargs["proxies"] = {"http": proxy, "https": proxy}
-        elif is_xhcdn:
-            # Direct fetch, OS DNS, HTTP/2 — no DoH, no HTTP/3
-            # This ensures the outbound IP matches what XH signed the CDN URL for
-            fetch_kwargs["http_version"] = 2
+        if is_xhcdn:
+            # XHamster CDN URLs are IP-locked to the IP that fetched the page.
+            # Use plain requests (OS TCP stack, no DoH) — same outbound IP as page fetch.
+            import requests as _std_requests
+            proxy_dict = {"http": proxy, "https": proxy} if proxy else None
+            upstream = _std_requests.get(
+                cdn_url, headers=headers, allow_redirects=True,
+                timeout=30, stream=True, proxies=proxy_dict,
+            )
         else:
-            fetch_kwargs["http_version"] = 3
-            fetch_kwargs["doh_url"] = "https://1.1.1.1/dns-query"
-
-        upstream = session.get(cdn_url, **fetch_kwargs)
-
-        # Fallback: plain fetch with no options
-        if upstream.status_code not in (200, 206):
-            upstream.close()
-            upstream = session.get(cdn_url, headers=headers,
-                                   allow_redirects=True, timeout=30, stream=True)
+            session = cffi_req.Session(impersonate="chrome124")
+            fetch_kwargs = dict(
+                headers=headers, allow_redirects=True, timeout=30, stream=True,
+                http_version=3, doh_url="https://1.1.1.1/dns-query",
+            )
+            if proxy:
+                fetch_kwargs["proxies"] = {"http": proxy, "https": proxy}
+            upstream = session.get(cdn_url, **fetch_kwargs)
 
         if upstream.status_code not in (200, 206):
             return jsonify({"status": "error", "message": f"CDN returned HTTP {upstream.status_code}."}), upstream.status_code
