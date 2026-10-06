@@ -253,11 +253,20 @@ def xh_watch():
     try:
         base_url = request.host_url.rstrip("/")
         result   = get_all_qualities(url)
-        qualities = [{
-            **q,
-            "proxy_url":    make_proxy_url(base_url, "/adult/proxy", q["url"], quality=q["quality"]),
-            "download_url": make_proxy_url(base_url, "/adult/proxy", q["url"], extra="&dl=1", quality=q["quality"]),
-        } for q in result["qualities"]]
+        xh_cdn_hosts = ("xhcdn.com", "xhpingcdn.com", "xhstorage.com")
+        qualities = []
+        for q in result["qualities"]:
+            cdn_url = q["url"]
+            is_xh = any(h in cdn_url for h in xh_cdn_hosts)
+            # For XHamster MP4: use raw CDN URL directly for playback (no proxy needed)
+            # For download: still use proxy (server adds Referer header)
+            proxy_url = cdn_url if (is_xh and q["format"] == "mp4") else \
+                        make_proxy_url(base_url, "/adult/proxy", cdn_url, quality=q["quality"])
+            qualities.append({
+                **q,
+                "proxy_url":    proxy_url,
+                "download_url": make_proxy_url(base_url, "/adult/proxy", cdn_url, extra="&dl=1", quality=q["quality"]),
+            })
         if not qualities:
             return "<h2>No streams found.</h2>", 404
         return render_watch_page(result, qualities)

@@ -452,9 +452,15 @@ def adult_proxy():
     # For MP4 (non-HLS, non-download): redirect directly to CDN.
     xh_cdn_hosts = ("xhcdn.com", "xhpingcdn.com", "xhstorage.com", "xhmscdn")
     is_xh_cdn = any(h in cdn_url for h in xh_cdn_hosts)
-    if is_xh_cdn and not is_m3u8 and not is_ts and not download_mode:
-        from flask import redirect as flask_redirect
-        return flask_redirect(cdn_url, code=302)
+    if is_xh_cdn and not is_m3u8 and not is_ts:
+        if download_mode:
+            # For downloads: stream through server with correct headers
+            pass  # fall through to streaming code below
+        else:
+            # For playback: redirect directly — browser will play MP4 natively
+            # XHamster CDN accepts direct browser requests for MP4 (no Referer check on MP4)
+            from flask import redirect as flask_redirect
+            return flask_redirect(cdn_url, code=302)
 
     try:
         from curl_cffi import requests as cffi_req
