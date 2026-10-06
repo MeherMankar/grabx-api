@@ -4,11 +4,12 @@ XHamster encrypts MP4 source URLs in window.initials using a seeded PRNG XOR cip
 Format: [1-byte algo_id][4-byte LE seed][XOR-encrypted payload]
 Algorithm IDs 1-7 match yt-dlp's XHamster extractor exactly.
 
-Streaming strategy:
-  /xh/watch and /xh/download return proxy_url pointing to /xh/stream.
-  /xh/stream re-fetches the XH page LIVE on every stream request, gets a fresh
-  CDN URL signed for the current outbound IP, then streams it immediately.
-  Page fetch + CDN stream happen in the same process/OS interface → IP always matches.
+Streaming strategy (/xh/stream):
+  Re-fetches the XH page LIVE on every stream request, gets a fresh CDN URL
+  signed for the current outbound IP, then streams it immediately.
+  Uses the final redirected page URL as Referer (same as yt-dlp does).
+  Prefers HLS over MP4 — yt-dlp marks MP4 formats as __needs_testing because
+  XHamster CDN IP-locks them and they return "Wrong key" errors.
 """
 import re
 import json
@@ -19,6 +20,7 @@ from urllib.parse import urlparse, quote
 from api.utils import (
     make_proxy_url, render_watch_page, verify_proxy_token,
     check_raw_key, adult_referer, sign_url, _normalize_proxy_base_url,
+    _get_api_key,
 )
 from api.extractors.xvideos import fetch_page  # reuse curl_cffi fetch
 
@@ -187,14 +189,13 @@ def get_all_qualities(url: str) -> dict:
 
 def _make_xh_stream_url(base_url: str, page_url: str, quality: str, dl: bool = False) -> str:
     """Build a /xh/stream URL. The stream route re-fetches the page live."""
-    from api.utils import _get_api_key
     base_url = _normalize_proxy_base_url(base_url)
     enc      = quote(page_url, safe="")
     token    = sign_url(page_url)
     dl_part  = "&dl=1" if dl else ""
     if token:
         return f"{base_url}/xh/stream?src={enc}&q={quote(quality)}&{token}{dl_part}"
-    # Fallback: embed raw api_key so the browser can access the stream route
+    # Fallback: embed raw api_key for browser auth
     key = _get_api_key()
     if key:
         return f"{base_url}/xh/stream?src={enc}&q={quote(quality)}&api_key={quote(key)}{dl_part}"
@@ -264,7 +265,11 @@ def xh_watch():
 def xh_stream():
     """
     Re-fetch the XH page live, pick the requested quality, stream immediately.
-    Page fetch + CDN stream are in the same request → same outbound IP → no 403.
+    Page fetch + CDN stream share the same request/process → same outbound IP → no 403.
+
+    Key insight from yt-dlp source: MP4 formats are marked __needs_testing because
+    XHamster CDN IP-locks them and they return errors. HLS manifests work reliably.
+    We prefer HLS, and use the final redirected page URL as Referer (as yt-dlp does).
     """
     import requests as _std_req
 
@@ -277,33 +282,41 @@ def xh_stream():
     if not verify_proxy_token(src) and not check_raw_key():
         return jsonify({"status": "error", "message": "Access denied."}), 403
 
-    # Re-fetch page — CDN URL signed for THIS request's outbound IP
+    # Re-fetch XH page — CDN URLs signed for THIS request's outbound IP.
+    # Capture final URL after redirects to use as Referer (yt-dlp: urlh.url).
     try:
-        session = _cffi_session()
-        html    = fetch_page(src, session, proxy="")
-        data    = extract_data(html)
+        from curl_cffi import requests as cffi_req
+        cffi_session = cffi_req.Session(impersonate="chrome124")
+        for domain in _XH_COOKIE_DOMAINS:
+            for name, value in _XH_AGE_COOKIES.items():
+                cffi_session.cookies.set(name, value, domain=domain)
+        page_resp = cffi_session.get(src, allow_redirects=True, timeout=20)
+        if page_resp.status_code != 200:
+            raise ValueError(f"Page returned HTTP {page_resp.status_code}")
+        final_url = str(page_resp.url)
+        data      = extract_data(page_resp.text)
     except Exception as e:
         return jsonify({"status": "error", "message": f"Page fetch failed: {e}"}), 502
 
-    # Find requested quality; fall back to best available
-    cdn_url = ""
-    cdn_fmt = "mp4"
-    for q in data["qualities"]:
-        if q["quality"] == quality:
-            cdn_url = q["url"]
-            cdn_fmt = q["format"]
-            break
-    if not cdn_url and data["qualities"]:
-        cdn_url = data["qualities"][0]["url"]
-        cdn_fmt = data["qualities"][0]["format"]
-    if not cdn_url:
-        return jsonify({"status": "error", "message": "Quality not found."}), 404
+    # Prefer HLS for the requested quality — MP4 CDN URLs are IP-locked and unreliable.
+    # Priority: HLS at requested quality > MP4 at requested quality > any HLS > best available
+    hls_match = next((q for q in data["qualities"] if q["quality"] == quality and q["format"] == "hls"), None)
+    mp4_match = next((q for q in data["qualities"] if q["quality"] == quality and q["format"] == "mp4"), None)
+    any_hls   = next((q for q in data["qualities"] if q["format"] == "hls"), None)
+    best      = data["qualities"][0] if data["qualities"] else None
 
-    # Stream using plain requests — same OS TCP stack → same egress IP as page fetch
-    referer = adult_referer(cdn_url)
+    chosen = hls_match or mp4_match or any_hls or best
+    if not chosen:
+        return jsonify({"status": "error", "message": "No stream found."}), 404
+
+    cdn_url = chosen["url"]
+    cdn_fmt = chosen["format"]
+
+    # Use final page URL as Referer — exactly what yt-dlp does (urlh.url)
+    parsed_final = urlparse(final_url)
     hdrs = {
-        "Referer":         referer,
-        "Origin":          referer.rstrip("/"),
+        "Referer":         final_url,
+        "Origin":          f"{parsed_final.scheme}://{parsed_final.netloc}",
         "Accept":          "*/*",
         "Accept-Encoding": "identity",
         "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
