@@ -161,8 +161,13 @@ def build_qualities(data: dict, base_url: str, proxy_path: str, referer: str) ->
 
 def _request_adult_stream(session, url: str, headers: dict):
     """Try the original direct HTTP/3 route before configured proxy fallbacks."""
+    import re as _re
     from api.utils import get_proxy, get_proxy_for_url, _parse_proxy_list
     pinned_proxy = get_proxy_for_url(url)
+
+    # Check if the CDN URL has an IP-lock marker (data=<IP>-dvp)
+    has_ip_marker = bool(_re.search(r"/data=\d{1,3}(?:\.\d{1,3}){3}-dvp", url))
+
     proxy = get_proxy()
     if pinned_proxy:
         alternate_proxies = [
@@ -170,6 +175,7 @@ def _request_adult_stream(session, url: str, headers: dict):
             if candidate != pinned_proxy
         ]
         proxy = alternate_proxies[0] if alternate_proxies else ""
+
     attempts = [
         ("HTTP/3", {
             "http_version": 3,
@@ -178,13 +184,20 @@ def _request_adult_stream(session, url: str, headers: dict):
         ("negotiated HTTP", {}),
     ]
     if pinned_proxy:
+        # URL was signed for this specific proxy IP — try it directly
         attempts.append(("IP-matched proxy", {
             "proxies": {"http": pinned_proxy, "https": pinned_proxy},
         }))
-    if proxy and proxy != pinned_proxy:
-        attempts.append(("configured proxy", {
-            "proxies": {"http": proxy, "https": proxy},
-        }))
+    elif has_ip_marker:
+        # URL was signed for the server's own IP (no proxy used during page fetch).
+        # Only try direct routes — adding a proxy will cause 403.
+        pass
+    else:
+        # No IP lock — try configured proxy as fallback
+        if proxy:
+            attempts.append(("configured proxy", {
+                "proxies": {"http": proxy, "https": proxy},
+            }))
 
     last_response = None
     last_error = None
