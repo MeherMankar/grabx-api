@@ -234,10 +234,10 @@ def _rewrite_hls_manifest(manifest_text: str, manifest_url: str, base_url: str) 
 
 def _select_hls_variant(manifest_text: str, requested_quality: str) -> str:
     """Return the HLS variant nearest to the requested video height."""
-    if not requested_quality or "#EXT-X-STREAM-INF:" not in manifest_text:
+    if "#EXT-X-STREAM-INF:" not in manifest_text:
         return ""
     try:
-        target = int(requested_quality)
+        target = int(requested_quality) if requested_quality.isdigit() else 99999
     except ValueError:
         return ""
 
@@ -248,7 +248,7 @@ def _select_hls_variant(manifest_text: str, requested_quality: str) -> str:
         line = line.strip()
         if line.startswith("#EXT-X-STREAM-INF:"):
             match = re.search(r"(?:^|,)RESOLUTION=\d+x(\d+)(?:,|$)", line)
-            pending_height = int(match.group(1)) if match else None
+            pending_height = int(match.group(1)) if match else 0
         elif pending_height is not None and line and not line.startswith("#"):
             distance = abs(pending_height - target)
             if selected_distance is None or distance < selected_distance:
@@ -289,6 +289,11 @@ def xh_download():
         result     = get_all_qualities(page_url)
         stream_url = _make_xh_stream_url(base_url, page_url)
         hls_qualities = _hls_quality_options(result.get("hls_url", ""))
+        if not hls_qualities:
+            hls_qualities = [
+                q["quality"] for q in result["qualities"]
+                if q["quality"].isdigit()
+            ]
         qualities  = [{
             "quality":      quality,
             "format":       "hls",
@@ -341,6 +346,11 @@ def xh_watch():
         result     = get_all_qualities(url)
         stream_url = _make_xh_stream_url(base_url, url)
         hls_qualities = _hls_quality_options(result.get("hls_url", ""))
+        if not hls_qualities:
+            hls_qualities = [
+                q["quality"] for q in result["qualities"]
+                if q["quality"].isdigit()
+            ]
         qualities  = [{
             "quality": quality,
             "format":       "hls",
@@ -502,7 +512,31 @@ def xh_stream():
                         "message": f"Manifest CDN returned HTTP {manifest_resp.status_code}."}), manifest_resp.status_code
 
     actual_url = manifest_resp.url
+    requested_quality = request.args.get("quality", "").strip()
+    variant_uri = _select_hls_variant(manifest_resp.text, requested_quality)
+    if variant_uri:
+        variant_url = urljoin(actual_url, variant_uri)
+        try:
+            variant_resp = _std_req.get(
+                variant_url, headers=hdrs, timeout=20, allow_redirects=True,
+            )
+        except Exception as e:
+            return jsonify({"status": "error", "message": f"Variant fetch error: {e}"}), 502
+        if variant_resp.status_code not in (200, 206):
+            return jsonify({
+                "status": "error",
+                "message": f"Variant CDN returned HTTP {variant_resp.status_code}.",
+            }), variant_resp.status_code
+        manifest_resp.close()
+        manifest_resp = variant_resp
+        actual_url = manifest_resp.url
+
     if dl:
+        init_urls = []
+        for line in manifest_resp.text.splitlines():
+            match = re.search(r'URI="([^"]+)"', line)
+            if line.startswith("#EXT-X-MAP:") and match:
+                init_urls.append(urljoin(actual_url, match.group(1)))
         segment_urls = [
             urljoin(actual_url, line.strip())
             for line in manifest_resp.text.splitlines()
@@ -523,25 +557,34 @@ def xh_stream():
             "X-Accel-Buffering": "no",
         }
         manifest_resp.close()
+        download_urls = init_urls + segment_urls
 
         def download_hls_segments():
-            for segment_url in segment_urls:
+            for index, segment_url in enumerate(download_urls, start=1):
+                segment = None
                 try:
                     segment = _std_req.get(
                         segment_url, headers=hdrs, stream=True,
                         allow_redirects=True, timeout=30,
                     )
                     if segment.status_code not in (200, 206):
+                        raise RuntimeError(
+                            f"part {index}/{len(download_urls)} returned "
+                            f"HTTP {segment.status_code}"
+                        )
+                    for chunk in segment.iter_content(chunk_size=65536):
+                        if chunk:
+                            yield chunk
+                except Exception as exc:
+                    from flask import current_app
+                    current_app.logger.error(
+                        "XHamster HLS download stopped at %s/%s: %s",
+                        index, len(segment_urls), exc,
+                    )
+                    return
+                finally:
+                    if segment is not None:
                         segment.close()
-                        continue
-                    try:
-                        for chunk in segment.iter_content(chunk_size=65536):
-                            if chunk:
-                                yield chunk
-                    finally:
-                        segment.close()
-                except Exception:
-                    continue
 
         return Response(
             stream_with_context(download_hls_segments()),
@@ -553,25 +596,6 @@ def xh_stream():
     # Rewrite all segment/sub-manifest URLs through /xh/seg
     base_url     = request.host_url.rstrip("/")
     actual_url   = manifest_resp.url  # URL after any redirects
-    requested_quality = request.args.get("quality", "").strip()
-    variant_uri = _select_hls_variant(manifest_resp.text, requested_quality)
-    if variant_uri:
-        variant_url = urljoin(actual_url, variant_uri)
-        try:
-            variant_resp = _std_req.get(
-                variant_url, headers=hdrs, timeout=20, allow_redirects=True,
-            )
-        except Exception as e:
-            return jsonify({"status": "error", "message": f"Variant fetch error: {e}"}), 502
-        if variant_resp.status_code not in (200, 206):
-            return jsonify({
-                "status": "error",
-                "message": f"Variant CDN returned HTTP {variant_resp.status_code}.",
-            }), variant_resp.status_code
-        manifest_resp.close()
-        manifest_resp = variant_resp
-        actual_url = manifest_resp.url
-
     rewritten    = _rewrite_hls_manifest(manifest_resp.text, actual_url, base_url)
 
     return Response(
